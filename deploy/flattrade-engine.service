@@ -1,0 +1,41 @@
+[Unit]
+Description=scalpX Options Execution & Ratcheting Engine
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/flattrade-engine
+EnvironmentFile=/etc/flattrade-engine/env
+ExecStart=/usr/bin/node dist/index.js
+
+# Hard Memory Limit (EC2 t4g.micro has 1GB RAM; engine RSS must stay < 150MB)
+MemoryMax=400M
+MemoryHigh=350M
+
+# Automatic recovery
+Restart=always
+RestartSec=3
+
+# Graceful termination
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+# Hardened Security & Sandbox Directives
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
+# Standard Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scalpx-engine
+
+[Install]
+WantedBy=multi-user.target

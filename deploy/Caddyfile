@@ -1,0 +1,44 @@
+# Caddyfile: Production HTTPS & WSS Reverse Proxy for scalpX
+# Automatically provisions and renews Let's Encrypt TLS certificates.
+
+{$DOMAIN:scalpx.yourdomain.com} {
+    # Encode responses
+    encode gzip zstd
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # WebSocket /ws endpoint
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade    websocket
+    }
+    reverse_proxy @websockets 127.0.0.1:3000
+
+    # REST API & Health check reverse proxy
+    reverse_proxy 127.0.0.1:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Health check keep-alive
+        transport http {
+            keepalive 30s
+            keepalive_idle_conns 10
+        }
+    }
+
+    # Logging
+    log {
+        output file /var/log/caddy/scalpx_access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}
