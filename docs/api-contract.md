@@ -37,7 +37,7 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
 
 ## 3. Authenticated REST Endpoints (`/api/*`)
 
-### 3.1 Get OAuth Login URL
+### 3.1 Get OAuth Login URL (Fallback)
 - **Method & Path:** `GET /api/auth/login-url`
 - **Headers:** `Authorization: Bearer <JWT>`, `X-Device-Id: <UUID>`
 - **Response `200 OK`:**
@@ -46,6 +46,28 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
   "loginUrl": "https://auth.flattrade.in/?app_key=YOUR_API_KEY"
 }
 ```
+
+### 3.2 Single-User Daily OTP Login (Primary)
+- **Method & Path:** `POST /api/auth/daily-login`
+- **Auth:** Required (`Authorization: Bearer <JWT>`, `X-Device-Id: <UUID>`)
+- **Description:** Submits the morning 6-digit SMS OTP or TOTP. The server executes the 3-step Flattrade auth chain (`/auth/session` -> `/ftauth` -> `/trade/apitoken`) from its static IPv4 and establishes the daily broker session.
+- **Request Body:**
+```json
+{
+  "otp": "123456"
+}
+```
+- **Response `200 OK`:**
+```json
+{
+  "status": "ok",
+  "message": "Daily Flattrade authentication successful",
+  "brokerConnected": true
+}
+```
+- **Error Responses:**
+  - `400 Bad Request`: `{ "error": "OTP must be a 6-digit numeric string" }`
+  - `401 Unauthorized`: `{ "error": "Flattrade authentication failed: Invalid OTP or session expired" }`
 
 ### 3.2 Get Option Chain
 - **Method & Path:** `GET /api/option-chain?symbol=NIFTY&strikes=10`

@@ -1,5 +1,9 @@
 import type { FlattradeRestAdapter } from '../adapters/broker/FlattradeRestAdapter.js';
 import type { StateStorePort } from '../domain/ports/StateStorePort.js';
+import type { FlattradeAuthClient } from '../adapters/broker/FlattradeAuthClient.js';
+import type { FlattradeWsAdapter } from '../adapters/broker/FlattradeWsAdapter.js';
+import type { ReconcilerService } from './ReconcilerService.js';
+import type { ClientWsHub } from '../adapters/transport/ClientWsHub.js';
 
 export function getTodayDateIST(date = new Date()): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -17,22 +21,83 @@ export function getTodayDateIST(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
+export class CooldownActiveError extends Error {
+  public readonly remainingSec: number;
+
+  constructor(remainingSec: number) {
+    super(`Too many failed login attempts. Retry after ${remainingSec} seconds.`);
+    this.name = 'CooldownActiveError';
+    this.remainingSec = remainingSec;
+  }
+}
+
+export interface SessionServiceOptions {
+  brokerMode?: 'paper' | 'live';
+  authClient?: FlattradeAuthClient;
+  wsFeed?: FlattradeWsAdapter;
+  reconciler?: ReconcilerService;
+  wsHub?: ClientWsHub;
+  cooldownMs?: number; // default: 15,000 (15 seconds)
+}
+
 export class SessionService {
   private readonly broker: FlattradeRestAdapter;
   private readonly stateStore: StateStorePort;
   private readonly apiKey: string;
+  private readonly brokerMode: 'paper' | 'live';
+  private authClient?: FlattradeAuthClient;
+  private wsFeed?: FlattradeWsAdapter;
+  private reconciler?: ReconcilerService;
+  private wsHub?: ClientWsHub;
 
-  constructor(broker: FlattradeRestAdapter, stateStore: StateStorePort, apiKey: string) {
+  private readonly cooldownMs: number;
+  private cooldownUntil = 0;
+
+  constructor(
+    broker: FlattradeRestAdapter,
+    stateStore: StateStorePort,
+    apiKey: string,
+    options: SessionServiceOptions = {}
+  ) {
     this.broker = broker;
     this.stateStore = stateStore;
     this.apiKey = apiKey;
+    this.brokerMode = options.brokerMode ?? 'paper';
+    this.authClient = options.authClient;
+    this.wsFeed = options.wsFeed;
+    this.reconciler = options.reconciler;
+    this.wsHub = options.wsHub;
+    this.cooldownMs = options.cooldownMs ?? 15000;
+  }
+
+  setAuthClient(authClient: FlattradeAuthClient): void {
+    this.authClient = authClient;
+  }
+
+  setWsFeed(wsFeed: FlattradeWsAdapter): void {
+    this.wsFeed = wsFeed;
+  }
+
+  setReconciler(reconciler: ReconcilerService): void {
+    this.reconciler = reconciler;
+  }
+
+  setWsHub(wsHub: ClientWsHub): void {
+    this.wsHub = wsHub;
   }
 
   /**
-   * Generates daily OAuth login URL for Flattrade v2 authentication.
+   * Generates daily OAuth login URL for Flattrade v2 browser authentication fallback.
    */
   getLoginUrl(): string {
     return `https://auth.flattrade.in/?app_key=${encodeURIComponent(this.apiKey)}`;
+  }
+
+  /**
+   * Alias matching the contract naming for the browser fallback URL.
+   */
+  getOAuthLoginUrl(): string {
+    return this.getLoginUrl();
   }
 
   /**
@@ -43,7 +108,28 @@ export class SessionService {
     const today = getTodayDateIST();
     await this.stateStore.saveDailySession(today, token);
     this.broker.setSessionToken(token);
+
+    if (this.wsFeed) {
+      this.wsFeed.updateSessionToken(token);
+      await this.wsFeed.connect().catch(() => {});
+    }
+
+    if (this.reconciler) {
+      await this.reconciler.reconcile().catch(() => {});
+    }
+
+    if (this.wsHub) {
+      this.wsHub.broadcastEvent('SESSION_UPDATED', { brokerConnected: true, tradeDate: today });
+    }
+
     return token;
+  }
+
+  /**
+   * Alias matching contract naming for OAuth callback exchange.
+   */
+  async handleOAuthCallback(requestCode: string): Promise<string> {
+    return this.exchangeAndSaveToken(requestCode);
   }
 
   /**
@@ -57,5 +143,83 @@ export class SessionService {
       return token;
     }
     return null;
+  }
+
+  /**
+   * Single-User Daily OTP/TOTP Login.
+   * Runs the 3-step server-side handshake from the EC2 static IP in live mode,
+   * or provides instant paper trading connection in paper mode.
+   * Enforces a 15-second cooldown upon any failed attempt.
+   */
+  async loginWithDailyOtp(otp: string): Promise<{ brokerConnected: true; tradeDate: string; tokenGeneratedAt: string }> {
+    const now = Date.now();
+    if (now < this.cooldownUntil) {
+      const remainingSec = Math.ceil((this.cooldownUntil - now) / 1000);
+      throw new CooldownActiveError(remainingSec);
+    }
+
+    const today = getTodayDateIST();
+    const tokenGeneratedAt = new Date().toISOString();
+
+    // Paper Mode: Instant mock session
+    if (this.brokerMode === 'paper') {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const paperToken = `PAPER_TOKEN_${today}_${Date.now()}`;
+      await this.stateStore.saveDailySession(today, paperToken);
+      if (typeof (this.broker as any).setSessionToken === 'function') {
+        this.broker.setSessionToken(paperToken);
+      }
+      this.wsHub?.broadcastEvent('SESSION_UPDATED', { brokerConnected: true, tradeDate: today });
+      this.cooldownUntil = 0;
+      return {
+        brokerConnected: true,
+        tradeDate: today,
+        tokenGeneratedAt,
+      };
+    }
+
+    // Live Mode: Run 3-step FlattradeAuthClient handshake
+    try {
+      if (!this.authClient) {
+        throw new Error('FlattradeAuthClient is not configured for live broker mode');
+      }
+
+      const token = await this.authClient.authenticateWithDailyOtp(otp);
+
+      // Persist to SQLite WAL store
+      await this.stateStore.saveDailySession(today, token);
+
+      // Update Rest Adapter token
+      this.broker.setSessionToken(token);
+
+      // Connect / Update WS Feed
+      if (this.wsFeed) {
+        this.wsFeed.updateSessionToken(token);
+        await this.wsFeed.connect().catch(() => {});
+      }
+
+      // Reconcile open positions
+      if (this.reconciler) {
+        await this.reconciler.reconcile().catch(() => {});
+      }
+
+      // Broadcast update to mobile clients
+      if (this.wsHub) {
+        this.wsHub.broadcastEvent('SESSION_UPDATED', { brokerConnected: true, tradeDate: today });
+      }
+
+      // Success clears any cooldown
+      this.cooldownUntil = 0;
+
+      return {
+        brokerConnected: true,
+        tradeDate: today,
+        tokenGeneratedAt,
+      };
+    } catch (err: unknown) {
+      // Activate 15-second cooldown on failure
+      this.cooldownUntil = Date.now() + this.cooldownMs;
+      throw err;
+    }
   }
 }

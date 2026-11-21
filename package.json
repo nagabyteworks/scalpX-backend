@@ -7,8 +7,12 @@
     "node": ">=20.0.0"
   },
   "scripts": {
+    "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "build:start": "tsc && node dist/index.js",
+    "jwt": "node scripts/generate-jwt.js",
+    "hash-password": "node scripts/hash-password.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

@@ -2,7 +2,13 @@ import fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply }
 import cors from '@fastify/cors';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import type { SessionService } from '../../application/SessionService.js';
+import { SessionService, CooldownActiveError } from '../../application/SessionService.js';
+import {
+  AuthSessionFailedError,
+  InvalidOtpError,
+  FallbackRequiredError,
+  TokenExchangeError,
+} from '../broker/FlattradeAuthClient.js';
 import type { OrderManager } from '../../application/OrderManager.js';
 import type { ReconcilerService } from '../../application/ReconcilerService.js';
 import type { RatchetLadderEngine } from '../../domain/engines/RatchetLadderEngine.js';
@@ -15,7 +21,12 @@ export interface HttpServerConfig {
   jwtSecret: string;
   brokerMode: 'paper' | 'live';
   flattradeWsFeed?: FlattradeWsAdapter;
+  logger?: any;
 }
+
+export const DailyOtpSchema = z.object({
+  otp: z.string().regex(/^\d{6}$/, 'OTP must be a 6-digit numeric string'),
+});
 
 // Zod Schemas for Request Validation
 export const OneClickOrderSchema = z.object({
@@ -91,7 +102,27 @@ export class HttpServer {
     this.broker = broker;
     this.wsHub = wsHub;
 
-    this.app = fastify({ logger: false });
+    this.app = fastify({
+      logger:
+        config.logger !== undefined
+          ? config.logger
+          : {
+              level: 'info',
+              redact: {
+                paths: [
+                  'req.body.otp',
+                  'body.otp',
+                  'otp',
+                  '*.api_secret',
+                  '*.Password',
+                  '*.jKey',
+                  '*.token',
+                  'headers.authorization',
+                ],
+                censor: '[REDACTED]',
+              },
+            },
+    });
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -189,9 +220,67 @@ export class HttpServer {
     // Authenticated API Endpoints
     // -------------------------------------------------------------
 
-    // Get Login URL
+    // Get Login URL (Fallback)
     this.app.get('/api/auth/login-url', async () => {
       return { loginUrl: this.sessionService.getLoginUrl() };
+    });
+
+    // Single-User Daily OTP Login (Primary)
+    this.app.post('/api/auth/daily-login', async (request, reply) => {
+      const parsed = DailyOtpSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({
+          error: 'OTP must be a 6-digit numeric string',
+          details: parsed.error.issues,
+        });
+        return;
+      }
+
+      try {
+        const result = await this.sessionService.loginWithDailyOtp(parsed.data.otp);
+        return {
+          status: 'ok',
+          message: 'Daily Flattrade authentication successful',
+          brokerConnected: true,
+          tradeDate: result.tradeDate,
+          tokenGeneratedAt: result.tokenGeneratedAt,
+        };
+      } catch (err: unknown) {
+        if (err instanceof CooldownActiveError) {
+          reply.code(429).send({
+            error: err.message,
+            remainingSec: err.remainingSec,
+          });
+          return;
+        }
+
+        if (err instanceof InvalidOtpError) {
+          reply.code(401).send({
+            error: `Flattrade authentication failed: ${err.message}`,
+          });
+          return;
+        }
+
+        if (err instanceof FallbackRequiredError) {
+          reply.code(502).send({
+            error: err.message,
+            fallbackRequired: true,
+          });
+          return;
+        }
+
+        if (err instanceof TokenExchangeError || err instanceof AuthSessionFailedError) {
+          reply.code(502).send({
+            error: `Flattrade communication error: ${err.message}`,
+          });
+          return;
+        }
+
+        const errMsg = err instanceof Error ? err.message : String(err);
+        reply.code(502).send({
+          error: `Login failed: ${errMsg}`,
+        });
+      }
     });
 
     // Option Chain

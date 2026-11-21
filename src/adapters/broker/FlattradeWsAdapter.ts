@@ -83,6 +83,14 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     this.orderUpdateListeners.push(listener);
   }
 
+  setSessionToken(token: string): void {
+    this.config.sessionToken = token;
+  }
+
+  updateSessionToken(token: string): void {
+    this.setSessionToken(token);
+  }
+
   private emitStatus(status: 'CONNECTED' | 'DISCONNECTED' | 'FEED_STALE' | 'RECONNECTING'): void {
     for (const listener of this.statusListeners) {
       try {

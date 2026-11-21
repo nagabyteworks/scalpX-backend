@@ -1,10 +1,11 @@
 import 'dotenv/config';
-import { z } from 'zod';
+import { loadConfig } from './config/env.js';
 import { SqliteStateStore } from './adapters/persistence/SqliteStateStore.js';
 import { RiskGuard } from './domain/engines/RiskGuard.js';
 import { RatchetLadderEngine } from './domain/engines/RatchetLadderEngine.js';
 import { FlattradeRestAdapter, createBrokerAdapter } from './adapters/broker/FlattradeRestAdapter.js';
 import { FlattradeWsAdapter } from './adapters/broker/FlattradeWsAdapter.js';
+import { FlattradeAuthClient } from './adapters/broker/FlattradeAuthClient.js';
 import { SessionService } from './application/SessionService.js';
 import { OrderManager } from './application/OrderManager.js';
 import { ReconcilerService } from './application/ReconcilerService.js';
@@ -12,33 +13,7 @@ import { HttpServer } from './adapters/transport/HttpServer.js';
 import { ClientWsHub } from './adapters/transport/ClientWsHub.js';
 
 // 1. Validate Environment Variables (Fail Fast)
-const EnvSchema = z.object({
-  PORT: z.coerce.number().default(3000),
-  HOST: z.string().default('0.0.0.0'),
-  BROKER_MODE: z.enum(['paper', 'live']).default('paper'),
-  APP_JWT_SECRET: z.string().min(8, 'APP_JWT_SECRET must be at least 8 characters'),
-  FLATTRADE_API_KEY: z.string().default('MOCK_KEY'),
-  FLATTRADE_API_SECRET: z.string().default('MOCK_SECRET'),
-  FLATTRADE_USER_ID: z.string().default('MOCK_USER'),
-  FLATTRADE_ACCOUNT_ID: z.string().optional(),
-  FLATTRADE_WS_URL: z.string().optional(),
-  DB_PATH: z.string().default('./scalpx.db'),
-  MAX_LOTS_PER_ORDER: z.coerce.number().default(4),
-  DEFAULT_LOT_SIZE: z.coerce.number().default(25),
-  MAX_OPEN_QTY_PER_SYMBOL: z.coerce.number().default(200),
-  MAX_DAILY_LOSS_PAISE: z.coerce.number().default(500000), // 5,000 INR
-});
-
-const parsedEnv = EnvSchema.safeParse(process.env);
-if (!parsedEnv.success) {
-  console.error('❌ FATAL: Environment variable validation failed:');
-  for (const issue of parsedEnv.error.issues) {
-    console.error(`  - ${issue.path.join('.')}: ${issue.message}`);
-  }
-  process.exit(1);
-}
-
-const env = parsedEnv.data;
+const env = loadConfig();
 
 async function bootstrap() {
   console.log(`🚀 Bootstrapping scalpX Backend (Mode: ${env.BROKER_MODE.toUpperCase()})`);
@@ -109,10 +84,24 @@ async function bootstrap() {
   }
 
   // 8. Session, Order, and Reconciler Services
+  const authClient = new FlattradeAuthClient({
+    userId: env.FLATTRADE_USER_ID,
+    passwordSha256: env.FLATTRADE_PASSWORD_SHA256,
+    apiKey: env.FLATTRADE_API_KEY,
+    apiSecret: env.FLATTRADE_API_SECRET,
+    authBaseUrl: env.FLATTRADE_AUTH_BASE_URL,
+  });
+
   const sessionService = new SessionService(
     broker instanceof FlattradeRestAdapter ? broker : (broker as any),
     stateStore,
-    env.FLATTRADE_API_KEY
+    env.FLATTRADE_API_KEY,
+    {
+      brokerMode: env.BROKER_MODE,
+      authClient,
+      wsFeed: flattradeWs,
+      wsHub: clientWsHub,
+    }
   );
 
   const feedPort = flattradeWs ?? {
@@ -123,6 +112,7 @@ async function bootstrap() {
 
   const orderManager = new OrderManager(broker, feedPort, engine, riskGuard, stateStore);
   const reconciler = new ReconcilerService(broker, feedPort, engine, stateStore);
+  sessionService.setReconciler(reconciler);
 
   // 9. Startup Reconciliation
   const todaySession = await sessionService.getValidTodaySession();
@@ -187,6 +177,7 @@ async function bootstrap() {
     try {
       clientWsHub.close();
       flattradeWs?.destroy();
+      await authClient.close().catch(() => {});
       stateStore.close();
       await server.close();
       console.log('✅ All components cleanly stopped. Goodbye.');

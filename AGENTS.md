@@ -13,6 +13,12 @@
 - **Marketable Limit Orders:** Every "1-click market" buy/sell must be converted to a `LMT` order priced slightly across the spread using live LTP/depth + configurable buffer, rounded to `0.05` tick size.
 - **Rate Limit:** Strictly under 10 orders/second. Enforce a client-side priority token bucket capped at **6 order/modify calls per second** where `EXIT_ALL` preempts routine `SL-LMT` ratchet updates.
 - **Static IP & Secrets:** Daily OAuth token exchange and all order calls run strictly from this server. Never log `api_secret` or raw `jKey` session tokens.
+- **Single-User Daily OTP Login Rules:**
+  - **Primary Daily Auth Flow (Server-Side 3-Step OTP/TOTP):**
+    - Static credentials (`FLATTRADE_USER_ID`, `FLATTRADE_PASSWORD_SHA256`, `FLATTRADE_API_KEY`, `FLATTRADE_API_SECRET`, `FLATTRADE_REDIRECT_URL`) are stored strictly in `/etc/flattrade-engine/env` (`chmod 600`) on EC2—NEVER hardcoded in TypeScript source files or committed to Git.
+    - The backend exposes `POST /api/auth/daily-login` accepting `{ otp: string }` (6-digit SMS OTP or TOTP) from the authenticated Android client and executes all three Flattrade auth calls (`/auth/session` -> `/ftauth` -> `/trade/apitoken`) directly from the EC2 Static IPv4.
+  - **Mandatory Fallback:** Keep `GET /api/auth/login-url` and `GET /auth/flattrade/callback` intact as a fallback browser OAuth path in case Flattrade ever triggers CAPTCHA or changes `/ftauth`.
+  - **Strict Secret Redaction:** NEVER log `FLATTRADE_PASSWORD_SHA256`, `FLATTRADE_API_SECRET`, incoming `otp`, `request_code`, or the resulting `jKey` session token in Fastify logs, SQLite `order_audit_log`, or error responses.
 
 ## 3. Financial Math & Concurrency Invariants
 - **Integer Paise Only:** Represent all prices internally as integer paise (`110.05` = `11005`). Never use floating-point arithmetic for price/tick/P&L calculations. Format to decimal strings (`"110.05"`) only at API/WS boundaries.

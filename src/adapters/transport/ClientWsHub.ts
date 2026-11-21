@@ -9,7 +9,8 @@ export type CriticalEventType =
   | 'SL_RATCHETED'
   | 'ORDER_REJECTED'
   | 'FEED_STALE'
-  | 'MANUAL_INTERVENTION_REQUIRED';
+  | 'MANUAL_INTERVENTION_REQUIRED'
+  | 'SESSION_UPDATED';
 
 export interface ClientWsHubConfig {
   jwtSecret: string;
