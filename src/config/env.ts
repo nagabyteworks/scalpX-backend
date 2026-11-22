@@ -4,8 +4,18 @@ import { z } from 'zod';
 
 export const EnvSchema = z.object({
   PORT: z.coerce.number().default(3000),
-  HOST: z.string().default('0.0.0.0'),
-  BROKER_MODE: z.enum(['paper', 'live']).default('paper'),
+  HOST: z.string().default('127.0.0.1'),
+  BROKER_MODE: z.enum(['paper', 'live']).default('live'),
+  /**
+   * TRADING_ENABLED independently controls whether new real orders can be submitted.
+   * Default: false (fail-closed). Must be set to 'true' explicitly to allow trading.
+   * Even in LIVE mode, trading is blocked unless TRADING_ENABLED=true.
+   * Emergency exits and protective SL handling are always permitted regardless of this flag.
+   */
+  TRADING_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   APP_JWT_SECRET: z.string().min(8, 'APP_JWT_SECRET must be at least 8 characters'),
 
   // Flattrade API v2 Credentials
@@ -22,6 +32,16 @@ export const EnvSchema = z.object({
   FLATTRADE_WS_URL: z.string().optional(),
   FLATTRADE_AUTH_BASE_URL: z.string().optional(), // For testing or custom auth host
 
+  /**
+   * DB_SESSION_ENCRYPTION_KEY: 32-byte hex key (64 hex chars) for AES-256-GCM encryption
+   * of broker session tokens stored in SQLite. Required in LIVE mode.
+   * Generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   */
+  DB_SESSION_ENCRYPTION_KEY: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/i, 'DB_SESSION_ENCRYPTION_KEY must be a 64-char hex string')
+    .optional(),
+
   // Persistence & Risk
   DB_PATH: z.string().default('./scalpx.db'),
   MAX_LOTS_PER_ORDER: z.coerce.number().default(4),
@@ -34,6 +54,7 @@ export type RawAppEnv = z.infer<typeof EnvSchema>;
 
 export interface AppConfig extends Omit<RawAppEnv, 'FLATTRADE_PASSWORD'> {
   FLATTRADE_PASSWORD_SHA256: string;
+  TRADING_ENABLED: boolean;
 }
 
 export function loadConfig(rawEnv: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -75,6 +96,22 @@ export function loadConfig(rawEnv: NodeJS.ProcessEnv = process.env): AppConfig {
 
     if (missing.length > 0) {
       throw new Error(`Missing required Flattrade live credentials: ${missing.join(', ')}`);
+    }
+
+    // Require encryption key for live mode (session tokens must not be stored plaintext)
+    if (!data.DB_SESSION_ENCRYPTION_KEY) {
+      throw new Error(
+        'Missing required DB_SESSION_ENCRYPTION_KEY for LIVE mode. ' +
+        "Generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+      );
+    }
+
+    // Warn if TRADING_ENABLED is not set (safe default remains false)
+    if (!data.TRADING_ENABLED) {
+      console.warn(
+        '⚠️  LIVE mode started with TRADING_ENABLED=false. ' +
+        'New order placement is BLOCKED. Set TRADING_ENABLED=true only after explicit approval.'
+      );
     }
   }
 

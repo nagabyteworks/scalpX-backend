@@ -28,6 +28,12 @@ export interface FlattradeConfig {
   authUrl?: string;
 }
 
+export interface ExitPositionResult extends OrderResult {
+  token: string;
+  success: boolean;
+  error?: string;
+}
+
 export class FlattradeRestAdapter implements BrokerPort {
   private readonly config: FlattradeConfig;
   private readonly baseUrl: string;
@@ -202,6 +208,7 @@ export class FlattradeRestAdapter implements BrokerPort {
       ordersource: 'API',
     };
 
+    // qty is REQUIRED by Flattrade ModifyOrder API
     if (intent.newQuantity !== undefined) {
       payload.qty = String(intent.newQuantity);
     }
@@ -282,7 +289,18 @@ export class FlattradeRestAdapter implements BrokerPort {
     return this.postForm<unknown>(FLATTRADE_ENDPOINTS.GET_OPTION_CHAIN, payload);
   }
 
+  /**
+   * Exits a single position by token.
+   *
+   * CRITICAL SAFETY RULES:
+   * 1. Cancels all open/trigger-pending orders for the token first.
+   * 2. Fetches live LTP from the broker. If LTP is unavailable, DOES NOT use a fallback price.
+   *    Instead, throws an error so the caller can alert for manual intervention.
+   * 3. Uses marketable-limit pricing (LTP ± 1 rupee buffer, rounded to 0.05 tick).
+   * 4. Never submits an order with an invented or stale price.
+   */
   async exitPosition(token: string, _commandId: string): Promise<OrderResult> {
+    // Cancel all open orders for this token first
     const orders = await this.getOrderBook();
     const openOrders = orders.filter((o) => o.token === token && (o.status === 'OPEN' || o.status === 'TRIGGER_PENDING'));
     for (const ord of openOrders) {
@@ -297,29 +315,56 @@ export class FlattradeRestAdapter implements BrokerPort {
     const positions = await this.getPositionBook();
     const pos = positions.find((p) => p.token === token);
     const netQty = parseInt(pos?.netqty ?? '0', 10);
-    if (netQty !== 0 && pos) {
-      const quote = await this.getQuotes(pos.exch, token);
-      const ltp = quote.lp ? parseFloat(quote.lp) : 100;
-      const buffer = netQty > 0 ? -1.0 : 1.0;
-      const marketablePrice = Math.max(0.05, Math.round((ltp + buffer) * 20) / 20);
 
-      return this.placeLimitOrder({
-        commandId: crypto.randomUUID(),
-        token,
-        symbol: pos.tsym,
-        exchange: pos.exch,
-        side: netQty > 0 ? 'SELL' : 'BUY',
-        orderType: 'LMT',
-        quantity: Math.abs(netQty),
-        pricePaise: Math.round(marketablePrice * 100),
-        priority: 'HIGH',
-      });
+    if (netQty === 0 || !pos) {
+      return { orderId: `EXIT_${token}`, status: 'FILLED' };
     }
 
-    return { orderId: `EXIT_${token}`, status: 'FILLED' };
+    // Fetch live quote — NEVER use a fallback invented price
+    const quote = await this.getQuotes(pos.exch, token);
+    if (!quote.lp || quote.lp === '0') {
+      throw new Error(
+        `exitPosition: LTP unavailable for token ${token} (${pos.tsym}). ` +
+          'Cannot safely submit exit order without a live market price. Manual intervention required.'
+      );
+    }
+
+    const ltp = parseFloat(quote.lp);
+    if (!isFinite(ltp) || ltp <= 0) {
+      throw new Error(
+        `exitPosition: Invalid LTP "${quote.lp}" for token ${token} (${pos.tsym}). ` +
+          'Cannot safely submit exit order. Manual intervention required.'
+      );
+    }
+
+    // Marketable-limit pricing: sell slightly below LTP, buy slightly above
+    const buffer = netQty > 0 ? -1.0 : 1.0;
+    const marketablePrice = Math.max(0.05, Math.round((ltp + buffer) * 20) / 20);
+
+    return this.placeLimitOrder({
+      commandId: crypto.randomUUID(),
+      token,
+      symbol: pos.tsym,
+      exchange: pos.exch,
+      side: netQty > 0 ? 'SELL' : 'BUY',
+      orderType: 'LMT',
+      quantity: Math.abs(netQty),
+      pricePaise: Math.round(marketablePrice * 100),
+      priority: 'HIGH',
+    });
   }
 
+  /**
+   * Exits all open positions.
+   *
+   * CRITICAL SAFETY RULES:
+   * 1. Attempts to exit each position independently.
+   * 2. NEVER swallows individual failures — collects and reports all results.
+   * 3. NEVER reports success while any position remains unresolved.
+   * 4. Throws a comprehensive error if any exit attempt fails.
+   */
   async exitAllPositions(commandId: string): Promise<void> {
+    // Cancel all open orders first (best effort)
     const orders = await this.getOrderBook();
     const openOrders = orders.filter((o) => o.status === 'OPEN' || o.status === 'TRIGGER_PENDING');
     for (const ord of openOrders) {
@@ -332,11 +377,38 @@ export class FlattradeRestAdapter implements BrokerPort {
     }
 
     const positions = await this.getPositionBook();
-    for (const pos of positions) {
-      const netQty = parseInt(pos.netqty ?? '0', 10);
-      if (netQty !== 0) {
-        await this.exitPosition(pos.token, `${commandId}_${pos.token}`).catch(() => {});
+    const openPositions = positions.filter((pos) => parseInt(pos.netqty ?? '0', 10) !== 0);
+
+    if (openPositions.length === 0) {
+      return;
+    }
+
+    const results: ExitPositionResult[] = [];
+
+    // Attempt each exit independently — never swallow failures
+    for (const pos of openPositions) {
+      try {
+        const res = await this.exitPosition(pos.token, `${commandId}_${pos.token}`);
+        results.push({ ...res, token: pos.token, success: true });
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        results.push({
+          orderId: `EXIT_FAILED_${pos.token}`,
+          status: 'REJECTED',
+          token: pos.token,
+          success: false,
+          error: errMsg,
+        });
       }
+    }
+
+    const failures = results.filter((r) => !r.success);
+    if (failures.length > 0) {
+      const failureDetails = failures.map((f) => `${f.token}: ${f.error ?? 'unknown'}`).join('; ');
+      throw new Error(
+        `exitAllPositions: ${failures.length}/${openPositions.length} exit(s) FAILED. ` +
+          `Manual intervention required. Failures: ${failureDetails}`
+      );
     }
   }
 

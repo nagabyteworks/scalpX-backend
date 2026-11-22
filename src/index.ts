@@ -16,20 +16,23 @@ import { ClientWsHub } from './adapters/transport/ClientWsHub.js';
 const env = loadConfig();
 
 async function bootstrap() {
-  console.log(`🚀 Bootstrapping scalpX Backend (Mode: ${env.BROKER_MODE.toUpperCase()})`);
+  console.log(`🚀 Bootstrapping scalpX Backend (Mode: ${env.BROKER_MODE.toUpperCase()}, Trading: ${env.TRADING_ENABLED ? 'ENABLED' : 'DISABLED'})`);
 
-  // 2. Initialize SQLite State Store
-  const stateStore = new SqliteStateStore(env.DB_PATH);
+  // 2. Initialize SQLite State Store (with encryption in LIVE mode)
+  const stateStore = new SqliteStateStore(env.DB_PATH, env.DB_SESSION_ENCRYPTION_KEY);
 
-  // 3. Initialize RiskGuard
-  const riskGuard = new RiskGuard({
-    lotSize: env.DEFAULT_LOT_SIZE,
-    maxLotsPerOrder: env.MAX_LOTS_PER_ORDER,
-    maxOpenQtyPerSymbol: env.MAX_OPEN_QTY_PER_SYMBOL,
-    maxDailyLossPaise: env.MAX_DAILY_LOSS_PAISE,
-    rateLimitCapacity: 6,
-    refillRatePerSec: 6,
-  });
+  // 3. Initialize RiskGuard with persistence (crash-safe daily loss limits)
+  const riskGuard = new RiskGuard(
+    {
+      lotSize: env.DEFAULT_LOT_SIZE,
+      maxLotsPerOrder: env.MAX_LOTS_PER_ORDER,
+      maxOpenQtyPerSymbol: env.MAX_OPEN_QTY_PER_SYMBOL,
+      maxDailyLossPaise: env.MAX_DAILY_LOSS_PAISE,
+      rateLimitCapacity: 6,
+      refillRatePerSec: 6,
+    },
+    stateStore // persistence for daily P&L and kill-switch state
+  );
 
   // 4. Initialize Broker Adapter
   const broker = createBrokerAdapter({
@@ -93,7 +96,7 @@ async function bootstrap() {
   });
 
   const sessionService = new SessionService(
-    broker instanceof FlattradeRestAdapter ? broker : (broker as any),
+    broker instanceof FlattradeRestAdapter ? broker : (broker as unknown as FlattradeRestAdapter),
     stateStore,
     env.FLATTRADE_API_KEY,
     {
@@ -117,7 +120,7 @@ async function bootstrap() {
   // 9. Startup Reconciliation
   const todaySession = await sessionService.getValidTodaySession();
   if (todaySession) {
-    console.log('✅ Found valid today session token in SQLite WAL.');
+    console.log('✅ Found valid today session token.');
     if (flattradeWs) {
       await flattradeWs.connect().catch((err) => {
         console.warn('⚠️ Flattrade WS connection failed on startup:', err.message);
@@ -129,9 +132,12 @@ async function bootstrap() {
     });
     if (summary) {
       console.log(`🔄 Reconciled: ${summary.checkedLadders} checked, ${summary.closedLadders} closed, ${summary.syncedLadders} active synced.`);
+      if (summary.uncertain) {
+        console.error(`⛔ Account state UNCERTAIN for tokens: [${summary.uncertainTokens.join(', ')}]. New entries BLOCKED.`);
+      }
     }
   } else {
-    console.log('ℹ️ No active session for today. Complete OAuth login via /auth/flattrade/callback.');
+    console.log('ℹ️ No active session for today. Complete OTP login via POST /api/auth/daily-login or OAuth via /auth/flattrade/callback.');
   }
 
   // 10. Start Fastify HTTP Server
@@ -139,7 +145,10 @@ async function bootstrap() {
     {
       jwtSecret: env.APP_JWT_SECRET,
       brokerMode: env.BROKER_MODE,
+      tradingEnabled: env.TRADING_ENABLED,
       flattradeWsFeed: flattradeWs,
+      // CORS: set to your Android app's origin or leave false for no CORS
+      corsOrigin: false,
     },
     sessionService,
     orderManager,

@@ -20,8 +20,15 @@ import type { ClientWsHub } from './ClientWsHub.js';
 export interface HttpServerConfig {
   jwtSecret: string;
   brokerMode: 'paper' | 'live';
+  tradingEnabled: boolean;
   flattradeWsFeed?: FlattradeWsAdapter;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   logger?: any;
+  /**
+   * Allowed CORS origins. Defaults to localhost-only in development.
+   * Production must set this to the Android app origin or '' to block all.
+   */
+  corsOrigin?: string | string[] | boolean;
 }
 
 export const DailyOtpSchema = z.object({
@@ -128,7 +135,11 @@ export class HttpServer {
   }
 
   private setupMiddleware(): void {
-    this.app.register(cors, { origin: true });
+    // CORS: restricted to configured origin only (not wildcard in production)
+    this.app.register(cors, {
+      origin: this.config.corsOrigin ?? false,
+      methods: ['GET', 'POST', 'PATCH'],
+    });
 
     // Authentication hook for all /api/* routes
     this.app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -165,26 +176,128 @@ export class HttpServer {
     });
   }
 
+  /**
+   * Checks if order placement is currently permitted.
+   * Returns an error message if blocked, or null if permitted.
+   *
+   * Emergency exits (exitPosition, exitAll) bypass this check deliberately.
+   */
+  private tradingBlockedReason(): string | null {
+    if (!this.config.tradingEnabled) {
+      return 'Trading is disabled (TRADING_ENABLED=false). Enable trading only after explicit approval.';
+    }
+    if (this.reconciler.isAccountStateUncertain) {
+      return `Account state uncertain (tokens: [${this.reconciler.uncertainTokens.join(', ')}]). Reconcile before placing new orders.`;
+    }
+    return null;
+  }
+
   private setupRoutes(): void {
     // -------------------------------------------------------------
-    // Unauthenticated Endpoints
+    // Health Endpoints (Unauthenticated)
     // -------------------------------------------------------------
 
-    // Health check
-    this.app.get('/health', async () => {
-      const openPositions = this.engine.getAllPositions().filter((p) => p.status === 'OPEN');
-      const memoryUsage = process.memoryUsage();
+    /**
+     * GET /health/live — Process liveness. Returns 200 as long as the process is running.
+     */
+    this.app.get('/health/live', async () => {
+      return { status: 'ok', uptimeSec: Math.round(process.uptime()) };
+    });
+
+    /**
+     * GET /health/ready — Readiness. Returns 503 when LIVE mode dependencies are unhealthy.
+     */
+    this.app.get('/health/ready', async (_req, reply) => {
+      if (this.config.brokerMode === 'paper') {
+        return { status: 'ok', brokerMode: 'paper', ready: true };
+      }
+
+      const issues: string[] = [];
+
+      // Check if session token is set
+      if (this.broker && 'getSessionToken' in this.broker) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const token = (this.broker as any).getSessionToken?.();
+        if (!token) {
+          issues.push('No active broker session token (daily login required)');
+        }
+      }
+
+      // Check feed status
+      if (this.config.flattradeWsFeed) {
+        const feedState = this.config.flattradeWsFeed.getConnectionState();
+        if (feedState !== 'CONNECTED') {
+          issues.push(`Market WebSocket feed is ${feedState}`);
+        }
+      }
+
+      // Check reconciliation state
+      if (this.reconciler.isAccountStateUncertain) {
+        issues.push(`Account state uncertain for tokens: [${this.reconciler.uncertainTokens.join(', ')}]`);
+      }
+
+      if (issues.length > 0) {
+        reply.code(503);
+        return {
+          status: 'not_ready',
+          brokerMode: this.config.brokerMode,
+          tradingEnabled: this.config.tradingEnabled,
+          issues,
+          timestamp: new Date().toISOString(),
+        };
+      }
 
       return {
         status: 'ok',
         brokerMode: this.config.brokerMode,
-        brokerConnected: true,
-        wsFeedHealthy: true,
+        tradingEnabled: this.config.tradingEnabled,
+        ready: true,
+        timestamp: new Date().toISOString(),
+      };
+    });
+
+    /**
+     * GET /health — Full health report. Never exposes credentials or tokens.
+     */
+    this.app.get('/health', async () => {
+      const openPositions = this.engine.getAllPositions().filter((p) => p.status === 'OPEN');
+      const memoryUsage = process.memoryUsage();
+
+      // Determine actual broker connectivity
+      let brokerConnected = false;
+      if (this.config.brokerMode === 'paper') {
+        brokerConnected = true;
+      } else if (this.broker && 'getSessionToken' in this.broker) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        brokerConnected = !!(this.broker as any).getSessionToken?.();
+      }
+
+      // Determine actual feed health
+      let wsFeedStatus: string = 'NOT_APPLICABLE';
+      if (this.config.brokerMode === 'live' && this.config.flattradeWsFeed) {
+        wsFeedStatus = this.config.flattradeWsFeed.getConnectionState();
+      } else if (this.config.brokerMode === 'paper') {
+        wsFeedStatus = 'PAPER_MODE';
+      }
+
+      return {
+        status: 'ok',
+        brokerMode: this.config.brokerMode,
+        tradingEnabled: this.config.tradingEnabled,
+        brokerConnected,
+        wsFeedStatus,
+        wsFeedHealthy: wsFeedStatus === 'CONNECTED' || wsFeedStatus === 'PAPER_MODE',
+        accountStateUncertain: this.reconciler.isAccountStateUncertain,
         openPositionsCount: openPositions.length,
         memoryRssMb: Math.round(memoryUsage.rss / (1024 * 1024)),
         uptimeSec: Math.round(process.uptime()),
+        timestamp: new Date().toISOString(),
       };
     });
+
+    // -------------------------------------------------------------
+    // Unauthenticated Auth Endpoints
+    // -------------------------------------------------------------
 
     // Flattrade OAuth Redirect Callback
     this.app.get('/auth/flattrade/callback', async (request, reply) => {
@@ -298,8 +411,14 @@ export class HttpServer {
       return { stat: 'Ok', values: [] };
     });
 
-    // 1-Click Order Execution
+    // 1-Click Order Execution — blocked when TRADING_ENABLED=false
     this.app.post('/api/orders/one-click', async (request, reply) => {
+      const blocked = this.tradingBlockedReason();
+      if (blocked) {
+        reply.code(403).send({ error: blocked });
+        return;
+      }
+
       const parsed = OneClickOrderSchema.safeParse(request.body);
       if (!parsed.success) {
         reply.code(400).send({ error: 'Validation failed', details: parsed.error.issues });
@@ -377,7 +496,7 @@ export class HttpServer {
       }
     });
 
-    // Exit Position
+    // Exit Position — always permitted regardless of TRADING_ENABLED (emergency exit)
     this.app.post('/api/orders/exit-position', async (request, reply) => {
       const parsed = ExitPositionSchema.safeParse(request.body);
       if (!parsed.success) {
@@ -394,7 +513,7 @@ export class HttpServer {
       }
     });
 
-    // Panic Exit All
+    // Panic Exit All — always permitted regardless of TRADING_ENABLED (emergency exit)
     this.app.post('/api/orders/exit-all', async (request, reply) => {
       const parsed = ExitAllSchema.safeParse(request.body);
       if (!parsed.success) {
@@ -407,7 +526,8 @@ export class HttpServer {
         return { success: true, message: 'Panic exit executed for all open positions' };
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        reply.code(500).send({ error: errMsg });
+        // Even partial failures are reported — never swallow
+        reply.code(207).send({ success: false, error: errMsg });
       }
     });
 
@@ -423,7 +543,7 @@ export class HttpServer {
     });
   }
 
-  async listen(port: number, host = '0.0.0.0'): Promise<string> {
+  async listen(port: number, host = '127.0.0.1'): Promise<string> {
     return this.app.listen({ port, host });
   }
 
