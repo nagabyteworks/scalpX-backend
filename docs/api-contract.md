@@ -47,6 +47,6 @@ The backend exchanges the request code, encrypts the daily session token in SQLi
 
 ## Environment and deployment
 
-Backend-only variables include `BROKER_MODE=live`, `TRADING_ENABLED=false`, `APP_JWT_SECRET`, `DEVICE_ENROLLMENT_SECRET`, `DEVICE_TOTP_SECRET`, `FLATTRADE_USER_ID`, `FLATTRADE_API_KEY`, `FLATTRADE_API_SECRET`, `FLATTRADE_REDIRECT_URL`, `DB_SESSION_ENCRYPTION_KEY`, and `DB_PATH`. Only `BROKER_MODE=live` is accepted. Use `.env.example` for names and safe placeholders. The SQLite database and Flattrade access token remain on the backend.
+Backend-only variables include `BROKER_MODE=live`, `TRADING_ENABLED=false`, `APP_JWT_SECRET`, `DEVICE_ENROLLMENT_SECRET`, `DEVICE_TOTP_SECRET`, `FLATTRADE_USER_ID`, `FLATTRADE_API_KEY`, `FLATTRADE_API_SECRET`, `FLATTRADE_REDIRECT_URL`, `DB_SESSION_ENCRYPTION_KEY`, and `DB_PATH`. Only `BROKER_MODE=live` is accepted. Local development loads them from ignored `.env`; production loads `/etc/scalpx/env`. The SQLite database and Flattrade access token remain on the backend.
 
 The Android base URL comes from the build environment, not a user preference. Deployment targets `/opt/scalpx`, reads `/etc/scalpx/env`, and preserves `/var/lib/scalpx`; the reviewed deploy script makes a code backup and restores it on failure. Do not run it without explicit production authorization.

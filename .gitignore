@@ -26,7 +26,6 @@ data/*.db*
 # Environment and secrets
 .env
 .env.*
-!.env.example
 
 # Logs
 logs/

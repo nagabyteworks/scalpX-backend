@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const deployScript = readFileSync(new URL('../deploy/deploy.sh', import.meta.url), 'utf8');
 const serviceUnit = readFileSync(new URL('../deploy/flattrade-engine.service', import.meta.url), 'utf8');
-const envExample = readFileSync(new URL('../.env.example', import.meta.url), 'utf8');
+const gitignore = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
 
 describe('deployment configuration safety', () => {
   it('deploys to the service working directory and checks external runtime paths', () => {
@@ -12,7 +12,9 @@ describe('deployment configuration safety', () => {
     expect(deployScript).toContain('ENV_FILE="/etc/scalpx/env"');
     expect(serviceUnit).toContain('EnvironmentFile=/etc/scalpx/env');
     expect(deployScript).toContain('DATA_DIR="/var/lib/scalpx"');
-    expect(envExample).toContain('DB_PATH=/var/lib/scalpx/scalpx.db');
+    expect(gitignore).toContain('.env');
+    expect(gitignore).toContain('.env.*');
+    expect(gitignore).not.toContain('!.env.example');
     expect(deployScript).toContain('test -r \'${ENV_FILE}\'');
     expect(deployScript).toContain('test -w \'${DATA_DIR}\'');
   });
