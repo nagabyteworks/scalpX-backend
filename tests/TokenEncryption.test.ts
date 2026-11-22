@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TokenEncryption, TokenEncryptionError } from '../../src/adapters/persistence/TokenEncryption.js';
+import { TokenEncryption, TokenEncryptionError } from '../src/adapters/persistence/TokenEncryption.js';
 
 const VALID_KEY = 'a'.repeat(64); // 64 hex chars (32 bytes)
 

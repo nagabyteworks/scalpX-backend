@@ -5,7 +5,7 @@ import { z } from 'zod';
 export const EnvSchema = z.object({
   PORT: z.coerce.number().default(3000),
   HOST: z.string().default('127.0.0.1'),
-  BROKER_MODE: z.enum(['paper', 'live']).default('live'),
+  BROKER_MODE: z.enum(['paper', 'live']).default('paper'),
   /**
    * TRADING_ENABLED independently controls whether new real orders can be submitted.
    * Default: false (fail-closed). Must be set to 'true' explicitly to allow trading.
