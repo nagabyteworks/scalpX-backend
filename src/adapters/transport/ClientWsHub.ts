@@ -81,25 +81,27 @@ export class ClientWsHub {
   }
 
   private authenticateRequest(req: http.IncomingMessage): boolean {
-    const url = new URL(req.url ?? '', 'http://127.0.0.1');
-
-    // Token from query ?token=... or header Authorization: Bearer ...
-    const queryToken = url.searchParams.get('token');
-    const headerToken = req.headers.authorization?.startsWith('Bearer ')
-      ? req.headers.authorization.substring(7)
-      : null;
-    const token = queryToken || headerToken;
-
-    // Device-Id from header X-Device-Id or query ?deviceId=...
-    const deviceId =
-      (req.headers['x-device-id'] as string) || url.searchParams.get('deviceId');
-
-    if (!token || !deviceId) {
+    // Strictly header-based authentication. Invariant: Never allow JWTs in query parameters.
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return false;
     }
 
+    const deviceId = req.headers['x-device-id'];
+    if (!deviceId || typeof deviceId !== 'string' || deviceId.trim().length === 0) {
+      return false;
+    }
+
+    const token = authHeader.substring(7);
+
     try {
-      jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] });
+      const decoded = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] }) as {
+        deviceId?: string;
+      };
+      // Enforce device-binding claim if present
+      if (decoded.deviceId && decoded.deviceId !== deviceId) {
+        return false;
+      }
       return true;
     } catch {
       return false;

@@ -140,6 +140,7 @@ async function bootstrap() {
   const server = new HttpServer(
     {
       jwtSecret: env.APP_JWT_SECRET,
+      enrollmentSecret: env.DEVICE_ENROLLMENT_SECRET,
       brokerMode: env.BROKER_MODE,
       tradingEnabled: env.TRADING_ENABLED,
       flattradeWsFeed: flattradeWs,
