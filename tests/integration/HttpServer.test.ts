@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import jwt from 'jsonwebtoken';
 import { HttpServer } from '../../src/adapters/transport/HttpServer.js';
 import { SqliteStateStore } from '../../src/adapters/persistence/SqliteStateStore.js';
-import { PaperBrokerAdapter } from '../../src/adapters/broker/PaperBrokerAdapter.js';
+import { MockBrokerAdapter } from '../mock/MockBrokerAdapter.js';
 import { RatchetLadderEngine } from '../../src/domain/engines/RatchetLadderEngine.js';
 import { RiskGuard } from '../../src/domain/engines/RiskGuard.js';
 import { OrderManager } from '../../src/application/OrderManager.js';
@@ -14,7 +14,7 @@ describe('HttpServer Transport Layer Integration', () => {
   const JWT_SECRET = 'TEST_JWT_SECRET_KEY_123456';
   let server: HttpServer;
   let stateStore: SqliteStateStore;
-  let broker: PaperBrokerAdapter;
+  let broker: MockBrokerAdapter;
   let engine: RatchetLadderEngine;
   let orderManager: OrderManager;
   let sessionService: SessionService;
@@ -24,7 +24,7 @@ describe('HttpServer Transport Layer Integration', () => {
 
   beforeEach(async () => {
     stateStore = new SqliteStateStore(':memory:');
-    broker = new PaperBrokerAdapter();
+    broker = new MockBrokerAdapter();
     broker.processTick({ token: '26000', ltpPaise: 11005, timestamp: Date.now() });
     engine = new RatchetLadderEngine(broker, stateStore);
 
@@ -51,8 +51,7 @@ describe('HttpServer Transport Layer Integration', () => {
     server = new HttpServer(
       {
         jwtSecret: JWT_SECRET,
-        brokerMode: 'paper',
-        tradingEnabled: true,
+        tradingEnabled: false,
       },
       sessionService,
       orderManager,
@@ -78,7 +77,8 @@ describe('HttpServer Transport Layer Integration', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const data = (await res.json()) as any;
     expect(data.status).toBe('ok');
-    expect(data.brokerMode).toBe('paper');
+    expect(data.environment).toBe('LIVE');
+    expect(data.tradingEnabled).toBe(false);
     expect(data.openPositionsCount).toBe(0);
   });
 
@@ -119,7 +119,7 @@ describe('HttpServer Transport Layer Integration', () => {
     expect(data.loginUrl).toContain('https://auth.flattrade.in/?app_key=API_KEY');
   });
 
-  it('POST /api/orders/one-click places entry and creates active ladder', async () => {
+  it('POST /api/orders/one-click rejects entry while live trading authorization is disabled', async () => {
     const res = await fetch(`${baseUrl}/api/orders/one-click`, {
       method: 'POST',
       headers: {
@@ -144,13 +144,9 @@ describe('HttpServer Transport Layer Integration', () => {
       }),
     });
 
-    expect(res.status).toBe(200);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const pos = (await res.json()) as any;
-    expect(pos.token).toBe('26000');
-    expect(pos.quantity).toBe(50);
-    expect(pos.status).toBe('OPEN');
-    expect(engine.getPosition('26000')).toBeDefined();
+    expect(res.status).toBe(403);
+    expect((await res.json() as any).error).toMatch(/disabled/i);
+    expect(engine.getPosition('26000')).toBeUndefined();
   });
 
   it('PATCH /api/ladders/:token live-edits ladder milestone & buffers', async () => {
@@ -188,12 +184,7 @@ describe('HttpServer Transport Layer Integration', () => {
       }),
     });
 
-    expect(res.status).toBe(200);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const updated = (await res.json()) as any;
-    expect(updated.nextMilestonePaise).toBe(11500);
-    expect(updated.stepSizePaise).toBe(600);
-    expect(updated.isPaused).toBe(true);
+    expect(res.status).toBe(404);
   });
 
   it('POST /api/orders/exit-all executes panic exit across all positions', async () => {
@@ -249,40 +240,45 @@ describe('HttpServer Transport Layer Integration', () => {
       expect(data.error).toBe('Missing request_code parameter in OAuth callback');
     });
 
-    it('GET /api/auth/flattrade/callback succeeds with request_code, unauthenticated, and redirects 302 to scalper://auth/success', async () => {
+    it('GET /api/auth/flattrade/callback reports exchange failure from a broker mock without OAuth support', async () => {
       const res = await fetch(`${baseUrl}/api/auth/flattrade/callback?request_code=MOCK_FLATTRADE_CODE_123`, {
         redirect: 'manual',
       });
 
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toBe('scalper://auth/success');
-
-      // Verify token persisted in SQLite store for today
-      const todaySession = await sessionService.getValidTodaySession();
-      expect(todaySession).toBeTruthy();
+      expect(res.status).toBe(502);
+      expect((await res.json() as any).error).toMatch(/OAuth exchange failed/);
     });
 
-    it('GET /api/auth/flattrade/callback succeeds with code parameter (fallback)', async () => {
+    it('GET /api/auth/flattrade/callback rejects an unsupported mocked code exchange', async () => {
       const res = await fetch(`${baseUrl}/api/auth/flattrade/callback?code=MOCK_LEGACY_CODE_456`, {
         redirect: 'manual',
       });
 
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toBe('scalper://auth/success');
+      expect(res.status).toBe(502);
     });
 
-    it('GET /auth/flattrade/callback legacy alias route also succeeds with 302 redirect', async () => {
+    it('GET /auth/flattrade/callback legacy alias uses the same safe failure response', async () => {
       const res = await fetch(`${baseUrl}/auth/flattrade/callback?request_code=MOCK_ALIAS_CODE_789`, {
         redirect: 'manual',
       });
 
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toBe('scalper://auth/success');
+      expect(res.status).toBe(502);
     });
   });
 
   describe('Auth Status & Option Chain Endpoints', () => {
-    it('GET /api/auth/status labels paper simulation and never claims a live feed', async () => {
+    it('GET /api/market-data/sensex returns unavailable without a verified broker index token', async () => {
+      const response = await fetch(`${baseUrl}/api/market-data/sensex`, {
+        headers: { 'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}` },
+      });
+      expect(response.status).toBe(503);
+      const data = await response.json() as any;
+      expect(data.index).toBe('SENSEX');
+      expect(data.status).toBe('INSTRUMENT_UNAVAILABLE');
+      expect(data.spotLtpPaise).toBeNull();
+    });
+
+    it('GET /api/auth/status reports LIVE mode without claiming a live feed', async () => {
       const res = await fetch(`${baseUrl}/api/auth/status`, {
         headers: {
           'X-Device-Id': 'DEVICE_123',
@@ -294,13 +290,14 @@ describe('HttpServer Transport Layer Integration', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const data = (await res.json()) as any;
       expect(data.status).toBeDefined();
-      expect(data.brokerMode).toBe('paper');
+      expect(data.environment).toBe('LIVE');
       expect(data.brokerConnected).toBe(false);
-      expect(data.sessionValid).toBe(true);
+      expect(data.sessionValid).toBe(false);
+      expect(data.sessionValidity).toBe('INVALID');
       expect(data.marketDataReady).toBe(false);
       expect(data.wsFeedHealthy).toBe(false);
       expect(data.status).not.toBe('FEED_READY');
-      expect(data.tradingEnabled).toBe(true);
+      expect(data.tradingEnabled).toBe(false);
     });
 
     it('GET /api/auth/status distinguishes live session, socket auth, and fresh feed transitions', async () => {
@@ -314,9 +311,8 @@ describe('HttpServer Transport Layer Integration', () => {
         isAuthenticatedConnection() { return this.authenticated; },
         isMarketDataReady() { return this.ready; },
       };
-      (server as any).config.brokerMode = 'live';
       (server as any).config.flattradeWsFeed = mutableFeed;
-      (server as any).sessionService = new SessionService(broker as any, stateStore, 'API_KEY', { brokerMode: 'live' });
+      (server as any).sessionService = new SessionService(broker as any, stateStore, 'API_KEY', {});
       broker.setSessionToken('stored-session');
       await stateStore.saveDailySession(getTodayDateIST(), 'stored-session');
       (broker as any).validateSession = async () => 'VALID';
@@ -343,7 +339,7 @@ describe('HttpServer Transport Layer Integration', () => {
       expect((await status()).status).toBe('WEBSOCKET_DISCONNECTED');
     });
 
-    it('GET /api/option-chain?symbol=SENSEX does not invent paper contracts', async () => {
+    it('GET /api/option-chain?symbol=SENSEX fails closed without authoritative instruments and fresh quotes', async () => {
       const res = await fetch(`${baseUrl}/api/option-chain?symbol=SENSEX&strikes=5`, {
         headers: {
           'X-Device-Id': 'DEVICE_123',
@@ -351,23 +347,26 @@ describe('HttpServer Transport Layer Integration', () => {
         },
       });
 
-      expect(res.status).toBe(200);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data = (await res.json()) as any;
-      expect(data.symbol).toBe('SENSEX');
-      expect(data.expiry).toBe('');
-      expect(data.simulated).toBe(true);
-      expect(Array.isArray(data.strikes)).toBe(true);
-      expect(data.strikes).toHaveLength(0);
+      expect(res.status).toBe(503);
+      expect((await res.json() as any).error).toMatch(/instrument master/i);
     });
 
     it('LIVE SENSEX chain fails closed without authoritative instrument and fresh spot data', async () => {
-      (server as any).config.brokerMode = 'live';
       const res = await fetch(`${baseUrl}/api/option-chain?symbol=SENSEX&strikes=5`, {
         headers: { 'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}` },
       });
       expect(res.status).toBe(503);
       expect((await res.json() as any).error).toContain('instrument master');
     });
+  });
+
+  it('GET /health/ready remains unready while the instrument master and execution authorization are unavailable', async () => {
+    const response = await fetch(`${baseUrl}/health/ready`);
+    expect(response.status).toBe(503);
+    const payload = await response.json() as any;
+    expect(payload.tradingReady).toBe(false);
+    expect(payload.components.instrumentMaster).toBe('UNAVAILABLE');
+    expect(payload.components.sensexSpot).toBe('UNAVAILABLE');
+    expect(payload.components.trading).toBe('DISABLED');
   });
 });

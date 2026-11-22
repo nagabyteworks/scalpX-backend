@@ -14,9 +14,9 @@ import {
   type FlattradePosition,
   type FlattradeOrderBookItem,
   type FlattradeQuote,
+  type FlattradeIndexEntry,
   type FlattradeTokenResponse,
 } from './FlattradeProtocol.js';
-import { PaperBrokerAdapter } from './PaperBrokerAdapter.js';
 
 export interface FlattradeConfig {
   apiKey: string;
@@ -279,6 +279,20 @@ export class FlattradeRestAdapter implements BrokerPort {
     return this.postForm<FlattradeQuote>(FLATTRADE_ENDPOINTS.GET_QUOTES, payload);
   }
 
+  async getIndexList(exch: 'NSE' | 'BSE'): Promise<FlattradeIndexEntry[]> {
+    const response = await this.postForm<{ stat?: string; values?: unknown; emsg?: string }>(
+      FLATTRADE_ENDPOINTS.GET_INDEX_LIST,
+      { uid: this.config.userId, exch }
+    );
+    if (response.stat !== 'Ok' || !Array.isArray(response.values)) return [];
+    return response.values.flatMap((value): FlattradeIndexEntry[] => {
+      if (!value || typeof value !== 'object') return [];
+      const item = value as Record<string, unknown>;
+      if (typeof item.idxname !== 'string' || typeof item.token !== 'string' || !/^\d+$/.test(item.token)) return [];
+      return [{ idxname: item.idxname.trim(), token: item.token }];
+    });
+  }
+
   /** Validate the current jKey using Flattrade's documented read-only Limits API. */
   async validateSession(): Promise<'VALID' | 'INVALID' | 'UNKNOWN'> {
     try {
@@ -431,23 +445,4 @@ export class FlattradeRestAdapter implements BrokerPort {
   async close(): Promise<void> {
     await this.dispatcher.destroy();
   }
-}
-
-/**
- * Factory with BROKER_MODE=paper|live environment toggle.
- */
-export function createBrokerAdapter(config: Partial<FlattradeConfig> & { mode?: 'paper' | 'live' }): BrokerPort {
-  const mode = process.env.BROKER_MODE || config.mode || 'paper';
-  if (mode === 'live') {
-    return new FlattradeRestAdapter({
-      apiKey: config.apiKey ?? '',
-      apiSecret: config.apiSecret ?? '',
-      userId: config.userId ?? '',
-      accountId: config.accountId,
-      sessionToken: config.sessionToken,
-      baseUrl: config.baseUrl,
-      authUrl: config.authUrl,
-    });
-  }
-  return new PaperBrokerAdapter();
 }

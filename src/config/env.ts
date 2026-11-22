@@ -1,11 +1,10 @@
 import 'dotenv/config';
-import crypto from 'node:crypto';
 import { z } from 'zod';
 
 export const EnvSchema = z.object({
+  BROKER_MODE: z.literal('live').default('live'),
   PORT: z.coerce.number().default(3000),
   HOST: z.string().default('127.0.0.1'),
-  BROKER_MODE: z.enum(['paper', 'live']).default('paper'),
   /**
    * TRADING_ENABLED independently controls whether new real orders can be submitted.
    * Default: false (fail-closed). Must be set to 'true' explicitly to allow trading.
@@ -21,21 +20,16 @@ export const EnvSchema = z.object({
    * High-entropy enrollment secret used by the owner to provision new Android devices.
    * Stored securely in /etc/scalpx/env on EC2; never included in the Android APK.
    */
-  DEVICE_ENROLLMENT_SECRET: z.string().min(16).default('scalpx_dev_enrollment_secret_min16_chars'),
+  DEVICE_ENROLLMENT_SECRET: z.string().min(32, 'DEVICE_ENROLLMENT_SECRET must be at least 32 characters'),
 
   // Flattrade API v2 Credentials
   FLATTRADE_USER_ID: z.string().default('MOCK_USER'),
-  FLATTRADE_PASSWORD: z.string().optional(),
-  FLATTRADE_PASSWORD_SHA256: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/i, 'FLATTRADE_PASSWORD_SHA256 must be a 64-char hex string')
-    .optional(),
   FLATTRADE_API_KEY: z.string().default('MOCK_KEY'),
   FLATTRADE_API_SECRET: z.string().default('MOCK_SECRET'),
   FLATTRADE_REDIRECT_URL: z.string().default('https://trade.nagabyte.com/api/auth/flattrade/callback'),
   FLATTRADE_ACCOUNT_ID: z.string().optional(),
   FLATTRADE_WS_URL: z.string().optional(),
-  FLATTRADE_AUTH_BASE_URL: z.string().optional(), // For testing or custom auth host
+  DEVICE_TOTP_SECRET: z.string().optional(),
 
   /**
    * DB_SESSION_ENCRYPTION_KEY: 32-byte hex key (64 hex chars) for AES-256-GCM encryption
@@ -53,12 +47,12 @@ export const EnvSchema = z.object({
 
 export type RawAppEnv = z.infer<typeof EnvSchema>;
 
-export interface AppConfig extends Omit<RawAppEnv, 'FLATTRADE_PASSWORD'> {
-  FLATTRADE_PASSWORD_SHA256: string;
-  TRADING_ENABLED: boolean;
-}
+export interface AppConfig extends RawAppEnv { TRADING_ENABLED: boolean }
 
 export function loadConfig(rawEnv: NodeJS.ProcessEnv = process.env): AppConfig {
+  if (rawEnv.BROKER_MODE?.toLowerCase() === 'paper') {
+    throw new Error('PAPER broker mode is not supported. Configure Flattrade LIVE credentials.');
+  }
   const parsed = EnvSchema.safeParse(rawEnv);
   if (!parsed.success) {
     console.error('❌ FATAL: Environment variable validation failed:');
@@ -70,20 +64,11 @@ export function loadConfig(rawEnv: NodeJS.ProcessEnv = process.env): AppConfig {
 
   const data = parsed.data;
 
-  // Derive password hash if plaintext password provided
-  let passwordSha256 = data.FLATTRADE_PASSWORD_SHA256?.toLowerCase();
-  if (!passwordSha256 && data.FLATTRADE_PASSWORD && data.FLATTRADE_PASSWORD.trim().length > 0) {
-    passwordSha256 = crypto.createHash('sha256').update(data.FLATTRADE_PASSWORD.trim()).digest('hex').toLowerCase();
-  }
-
-  // Fail fast for live mode requirements
-  if (data.BROKER_MODE === 'live') {
+  // Live Flattrade is the only supported broker mode.
+  {
     const missing: string[] = [];
     if (!data.FLATTRADE_USER_ID || data.FLATTRADE_USER_ID === 'MOCK_USER') {
       missing.push('FLATTRADE_USER_ID');
-    }
-    if (!passwordSha256) {
-      missing.push('FLATTRADE_PASSWORD_SHA256 (or FLATTRADE_PASSWORD)');
     }
     if (!data.FLATTRADE_API_KEY || data.FLATTRADE_API_KEY === 'MOCK_KEY') {
       missing.push('FLATTRADE_API_KEY');
@@ -116,16 +101,5 @@ export function loadConfig(rawEnv: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
-  // Fallback hash for paper testing
-  if (!passwordSha256) {
-    passwordSha256 = '0000000000000000000000000000000000000000000000000000000000000000';
-  }
-
-  // Discard plaintext password
-  const { FLATTRADE_PASSWORD: _, ...cleanConfig } = data;
-
-  return {
-    ...cleanConfig,
-    FLATTRADE_PASSWORD_SHA256: passwordSha256,
-  };
+  return { ...data };
 }

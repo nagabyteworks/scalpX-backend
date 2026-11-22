@@ -29,7 +29,7 @@ describe('OAuthExchange & SessionService Integration', () => {
       authUrl: `${httpUrl}/trade/apitoken`,
     });
 
-    sessionService = new SessionService(restAdapter, stateStore, 'TEST_API_KEY_123', { brokerMode: 'live' });
+    sessionService = new SessionService(restAdapter, stateStore, 'TEST_API_KEY_123', {});
   });
 
   afterEach(async () => {
@@ -41,6 +41,15 @@ describe('OAuthExchange & SessionService Integration', () => {
   it('generates correct OAuth login URL', () => {
     const url = sessionService.getLoginUrl();
     expect(url).toBe('https://auth.flattrade.in/?app_key=TEST_API_KEY_123');
+  });
+
+  it('resolves the SENSEX spot token from the authenticated BSE index list, not a constant', async () => {
+    await stateStore.saveDailySession(getTodayDateIST(), 'VERIFIED_SESSION_TOKEN_XYZ');
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    expect(await sessionService.getSensexSpotInstrumentId()).toBe('BSE|987654321');
+    const request = mockServer.receivedRequests.find((item) => item.url.endsWith('/GetIndexList'));
+    expect(request).toBeDefined();
+    expect(new URLSearchParams(request!.body).get('jData')).toContain('"exch":"BSE"');
   });
 
   it('exchanges OAuth request_code, stores token in SQLite, and updates broker client', async () => {
@@ -66,7 +75,7 @@ describe('OAuthExchange & SessionService Integration', () => {
       baseUrl: `${httpUrl}/PiConnectAPI`,
       authUrl: `${httpUrl}/trade/apitoken`,
     });
-    const freshSessionService = new SessionService(freshAdapter, stateStore, 'TEST_API_KEY_123', { brokerMode: 'live' });
+    const freshSessionService = new SessionService(freshAdapter, stateStore, 'TEST_API_KEY_123', {});
 
     const loadedToken = await freshSessionService.getValidTodaySession();
     expect(loadedToken).toBe('VERIFIED_SESSION_TOKEN_XYZ');
@@ -85,7 +94,7 @@ describe('OAuthExchange & SessionService Integration', () => {
       apiKey: 'TEST_API_KEY_123', apiSecret: 'SECRET_456', userId: 'FT001',
       baseUrl: `${httpUrl}/PiConnectAPI`, authUrl: `${httpUrl}/trade/apitoken`,
     });
-    const freshSessionService = new SessionService(freshAdapter, stateStore, 'TEST_API_KEY_123', { brokerMode: 'live' });
+    const freshSessionService = new SessionService(freshAdapter, stateStore, 'TEST_API_KEY_123', {});
     const loadedToken = await freshSessionService.getValidTodaySession();
     expect(loadedToken).toBeNull();
     expect(await freshSessionService.getSessionState()).toEqual({

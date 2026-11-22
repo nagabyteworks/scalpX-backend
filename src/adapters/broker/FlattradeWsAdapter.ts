@@ -63,6 +63,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   // Stale-Feed Watchdog state
   private lastTickTimestamp = 0;
   private readonly lastTickByToken = new Map<string, number>();
+  private readonly latestTickByToken = new Map<string, Tick>();
   private watchdogTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -154,6 +155,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
           this.isAuthenticated = false;
           this.lastTickTimestamp = 0;
           this.lastTickByToken.clear();
+          this.latestTickByToken.clear();
           clearTimeout(timeout);
           this.connectionReject?.(new Error('Flattrade WebSocket disconnected before authentication completed'));
           this.connectionReject = null;
@@ -223,6 +225,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
             volume: msg.v ? parseInt(String(msg.v), 10) : undefined,
             timestamp: Date.now(),
           };
+          this.latestTickByToken.set(instrumentId, tick);
           this.tickCallback?.(tick);
         }
         return;
@@ -257,6 +260,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
 
     if (this.isAuthenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
       for (const id of instrumentIds) this.lastTickByToken.delete(id);
+      for (const id of instrumentIds) this.latestTickByToken.delete(id);
       this.lastTickTimestamp = 0;
       const keyStr = instrumentIds.join('#');
       this.send({ t: 't', k: keyStr });
@@ -268,6 +272,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     for (const id of instrumentIds) {
       this.subscribedTokens.delete(id);
       this.lastTickByToken.delete(id);
+      this.latestTickByToken.delete(id);
       this.subscriptionStartedAt.delete(id);
     }
     if (this.isAuthenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -276,10 +281,15 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     }
   }
 
+  getLatestTick(instrumentId: string): Tick | null {
+    return this.latestTickByToken.get(instrumentId) ?? null;
+  }
+
   private resubscribeAll(): void {
     if (this.subscribedTokens.size > 0) {
       const tokens = Array.from(this.subscribedTokens);
       for (const id of tokens) this.lastTickByToken.delete(id);
+      for (const id of tokens) this.latestTickByToken.delete(id);
       const now = Date.now();
       for (const id of tokens) this.subscriptionStartedAt.set(id, now);
       this.lastTickTimestamp = 0;

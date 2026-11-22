@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import jwt from 'jsonwebtoken';
 import { HttpServer } from '../src/adapters/transport/HttpServer.js';
 import { SqliteStateStore } from '../src/adapters/persistence/SqliteStateStore.js';
-import { PaperBrokerAdapter } from '../src/adapters/broker/PaperBrokerAdapter.js';
+import { MockBrokerAdapter } from './mock/MockBrokerAdapter.js';
 import { RatchetLadderEngine } from '../src/domain/engines/RatchetLadderEngine.js';
 import { RiskGuard } from '../src/domain/engines/RiskGuard.js';
 import { OrderManager } from '../src/application/OrderManager.js';
@@ -15,12 +15,12 @@ describe('Device Provisioning & Authorization Security', () => {
   const ENROLLMENT_SECRET = 'MASTER_ENROLLMENT_SECRET_12345';
   let server: HttpServer;
   let stateStore: SqliteStateStore;
-  let broker: PaperBrokerAdapter;
+  let broker: MockBrokerAdapter;
   let baseUrl: string;
 
   beforeEach(async () => {
     stateStore = new SqliteStateStore(':memory:');
-    broker = new PaperBrokerAdapter();
+    broker = new MockBrokerAdapter();
     const engine = new RatchetLadderEngine(broker, stateStore);
     const riskGuard = new RiskGuard({ rateLimitCapacity: 6, refillRatePerSec: 6 }, stateStore);
 
@@ -38,7 +38,7 @@ describe('Device Provisioning & Authorization Security', () => {
       {
         jwtSecret: JWT_SECRET,
         enrollmentSecret: ENROLLMENT_SECRET,
-        brokerMode: 'paper',
+        deviceTotpSecret: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',
         tradingEnabled: true,
       },
       sessionService,
@@ -59,13 +59,13 @@ describe('Device Provisioning & Authorization Security', () => {
   });
 
   describe('POST /api/auth/provision-device', () => {
-    it('provisions a device with valid enrollment secret and returns device-bound JWT', async () => {
+    it('pre-authorizes a device without bypassing TOTP authentication', async () => {
       // Direct call via Fastify inject to avoid TCP connection in sandbox
       const res = await server.app.inject({
         method: 'POST',
         url: '/api/auth/provision-device',
         headers: {
-          'x-device-id': 'device-uuid-1234',
+          'x-device-id': '398d304e-422d-4516-b589-00c9e73b99a1',
         },
         payload: {
           enrollmentSecret: ENROLLMENT_SECRET,
@@ -76,17 +76,28 @@ describe('Device Provisioning & Authorization Security', () => {
       expect(res.statusCode).toBe(200);
       const data = JSON.parse(res.payload);
       expect(data.status).toBe('ok');
-      expect(data.deviceId).toBe('device-uuid-1234');
-      expect(data.token).toBeDefined();
-
-      // Verify the token has device claim
-      const decoded = jwt.verify(data.token, JWT_SECRET) as any;
-      expect(decoded.deviceId).toBe('device-uuid-1234');
-      expect(decoded.role).toBe('owner');
+      expect(data.deviceId).toBe('398d304e-422d-4516-b589-00c9e73b99a1');
+      expect(data.token).toBeUndefined();
 
       // Verify device is recorded as authorized
-      const isAuth = await stateStore.isDeviceAuthorized('device-uuid-1234');
+      const isAuth = await stateStore.isDeviceAuthorized('398d304e-422d-4516-b589-00c9e73b99a1');
       expect(isAuth).toBe(true);
+    });
+
+    it('issues a short-lived JWT for a pre-authorized device and rejects TOTP replay', async () => {
+      const deviceId = '398d304e-422d-4516-b589-00c9e73b99a1';
+      await stateStore.authorizeDevice(deviceId, 'Test phone');
+      vi.setSystemTime(new Date(59_000));
+      const payload = { deviceId, totp: '287082', deviceName: 'Test phone' };
+      const first = await server.app.inject({ method: 'POST', url: '/api/auth/device/authenticate', payload });
+      expect(first.statusCode).toBe(200);
+      const issued = JSON.parse(first.payload);
+      expect(issued.expiresIn).toBe(900);
+      expect((jwt.verify(issued.accessToken, JWT_SECRET) as any).deviceId).toBe(deviceId);
+
+      const replay = await server.app.inject({ method: 'POST', url: '/api/auth/device/authenticate', payload });
+      expect(replay.statusCode).toBe(401);
+      vi.useRealTimers();
     });
 
     it('rejects provisioning when enrollment secret is incorrect', async () => {
@@ -130,7 +141,7 @@ describe('Device Provisioning & Authorization Security', () => {
         headers: { 'x-device-id': 'device-uuid-1234' },
         payload: { enrollmentSecret: ENROLLMENT_SECRET },
       });
-      const token = JSON.parse(provRes.payload).token;
+      const token = jwt.sign({ sub: 'scalpx-owner', role: 'owner', deviceId: 'device-uuid-1234' }, JWT_SECRET, { expiresIn: '15m' });
 
       // Access protected endpoint
       const res = await server.app.inject({
@@ -171,7 +182,7 @@ describe('Device Provisioning & Authorization Security', () => {
         headers: { 'x-device-id': 'device-uuid-revoke' },
         payload: { enrollmentSecret: ENROLLMENT_SECRET },
       });
-      const token = JSON.parse(provRes.payload).token;
+      const token = jwt.sign({ sub: 'scalpx-owner', role: 'owner', deviceId: 'device-uuid-revoke' }, JWT_SECRET, { expiresIn: '15m' });
 
       // Revoke device
       await stateStore.revokeDevice('device-uuid-revoke');

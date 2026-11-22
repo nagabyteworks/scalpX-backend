@@ -1,6 +1,7 @@
 import fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from 'jsonwebtoken';
+import { matchingTotpStep } from '../../application/Totp.js';
 import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,13 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import { SessionService, CooldownActiveError, getTodayDateIST } from '../../application/SessionService.js';
-import {
-  AuthSessionFailedError,
-  InvalidOtpError,
-  FallbackRequiredError,
-  TokenExchangeError,
-} from '../broker/FlattradeAuthClient.js';
+import { SessionService, getTodayDateIST } from '../../application/SessionService.js';
 import type { OrderManager } from '../../application/OrderManager.js';
 import type { ReconcilerService } from '../../application/ReconcilerService.js';
 import type { RatchetLadderEngine } from '../../domain/engines/RatchetLadderEngine.js';
@@ -25,7 +20,6 @@ import type { ClientWsHub } from './ClientWsHub.js';
 
 export interface HttpServerConfig {
   jwtSecret: string;
-  brokerMode: 'paper' | 'live';
   tradingEnabled: boolean;
   flattradeWsFeed?: FlattradeWsAdapter;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -39,6 +33,7 @@ export interface HttpServerConfig {
    * One-time or master enrollment secret for owner device provisioning.
    */
   enrollmentSecret?: string;
+  deviceTotpSecret?: string;
 }
 
 export const ProvisionDeviceSchema = z.object({
@@ -46,8 +41,10 @@ export const ProvisionDeviceSchema = z.object({
   deviceName: z.string().default('Android Device'),
 });
 
-export const DailyOtpSchema = z.object({
-  otp: z.string().regex(/^\d{6}$/, 'OTP must be a 6-digit numeric string'),
+export const DeviceAuthenticationSchema = z.object({
+  deviceId: z.string().uuid(),
+  totp: z.string().regex(/^\d{6}$/),
+  deviceName: z.string().trim().min(1).max(80).default('Android Device'),
 });
 
 // Zod Schemas for Request Validation
@@ -105,6 +102,7 @@ export class HttpServer {
   private readonly stateStore: SqliteStateStore;
   private readonly broker: BrokerPort;
   private readonly wsHub?: ClientWsHub;
+  private readonly deviceAuthFailures = new Map<string, { count: number; windowEndsAt: number }>();
 
   constructor(
     config: HttpServerConfig,
@@ -136,6 +134,9 @@ export class HttpServer {
                   'req.body.otp',
                   'body.otp',
                   'otp',
+                  'req.body.totp',
+                  'body.totp',
+                  'totp',
                   '*.api_secret',
                   '*.Password',
                   '*.jKey',
@@ -169,6 +170,7 @@ export class HttpServer {
       if (
         !url.startsWith('/api/') ||
         url === '/api/auth/provision-device' ||
+        url === '/api/auth/device/authenticate' ||
         url === '/api/auth/flattrade/callback'
       ) {
         return;
@@ -204,6 +206,11 @@ export class HttpServer {
         const isRevoked = await this.stateStore.isDeviceRevoked(deviceId);
         if (isRevoked) {
           reply.code(401).send({ error: 'Device authorization has been revoked' });
+          return;
+        }
+        const isAuthorized = await this.stateStore.isDeviceAuthorized(deviceId);
+        if (!isAuthorized) {
+          reply.code(403).send({ error: 'Device is not authorized' });
           return;
         }
 
@@ -250,10 +257,6 @@ export class HttpServer {
      * GET /health/ready — Readiness. Returns 503 when LIVE mode dependencies are unhealthy.
      */
     this.app.get('/health/ready', async (_req, reply) => {
-      if (this.config.brokerMode === 'paper') {
-        return { status: 'ok', brokerMode: 'paper', ready: true };
-      }
-
       const issues: string[] = [];
 
       const sessionState = await this.sessionService.getSessionState();
@@ -270,10 +273,19 @@ export class HttpServer {
         const feedState = this.config.flattradeWsFeed.getConnectionState();
         if (feedState !== 'CONNECTED') {
           issues.push(`Market WebSocket feed is ${feedState}`);
+        } else if (!this.config.flattradeWsFeed.isAuthenticatedConnection()) {
+          issues.push('Market WebSocket broker authentication is not confirmed');
         } else if (!this.config.flattradeWsFeed.isMarketDataReady()) {
           issues.push('Market WebSocket subscriptions have not produced fresh ticks');
         }
       }
+
+      // No official BFO instrument-master URL/schema has been verified yet.
+      // Keep all option and order readiness false until validated contracts and
+      // independently fresh spot/CE/PE quotes are available.
+      issues.push('Authoritative BFO instrument master is unavailable');
+      issues.push('SENSEX spot, CE, and PE quote readiness is unavailable');
+      if (!this.config.tradingEnabled) issues.push('Live order execution is disabled by configuration');
 
       // Check reconciliation state
       if (this.reconciler.isAccountStateUncertain) {
@@ -284,8 +296,19 @@ export class HttpServer {
         reply.code(503);
         return {
           status: 'not_ready',
-          brokerMode: this.config.brokerMode,
-          tradingEnabled: this.config.tradingEnabled,
+          environment: 'LIVE',
+          tradingReady: false,
+          components: {
+            brokerSession: sessionState.sessionValidity,
+            websocketTransport: this.config.flattradeWsFeed?.isTransportConnected() ? 'CONNECTED' : 'DISCONNECTED',
+            websocketAuthentication: this.config.flattradeWsFeed?.isAuthenticatedConnection() ? 'AUTHENTICATED' : 'UNAUTHENTICATED',
+            instrumentMaster: 'UNAVAILABLE',
+            sensexSpot: 'UNAVAILABLE',
+            callOption: 'UNAVAILABLE',
+            putOption: 'UNAVAILABLE',
+            optionChain: 'UNAVAILABLE',
+            trading: this.config.tradingEnabled ? 'CONFIGURED_BUT_NOT_READY' : 'DISABLED',
+          },
           issues,
           timestamp: new Date().toISOString(),
         };
@@ -293,9 +316,9 @@ export class HttpServer {
 
       return {
         status: 'ok',
-        brokerMode: this.config.brokerMode,
-        tradingEnabled: this.config.tradingEnabled,
+        environment: 'LIVE',
         ready: true,
+        tradingReady: false,
         timestamp: new Date().toISOString(),
       };
     });
@@ -309,30 +332,21 @@ export class HttpServer {
       const sessionState = await this.sessionService.getSessionState();
 
       // A stored token is session state, not proof of broker connectivity.
-      const brokerConnected = this.config.brokerMode === 'live'
-        ? sessionState.sessionValid && !!this.config.flattradeWsFeed?.isAuthenticatedConnection()
-        : false;
+      const brokerConnected = sessionState.sessionValid && !!this.config.flattradeWsFeed?.isAuthenticatedConnection();
 
       // Determine actual feed health
-      let wsFeedStatus: string = 'NOT_APPLICABLE';
-      if (this.config.brokerMode === 'live' && this.config.flattradeWsFeed) {
-        wsFeedStatus = this.config.flattradeWsFeed.getConnectionState();
-      } else if (this.config.brokerMode === 'paper') {
-        wsFeedStatus = 'PAPER_MODE';
-      }
+      const wsFeedStatus = this.config.flattradeWsFeed?.getConnectionState() ?? 'DISCONNECTED';
 
       return {
         status: 'ok',
-        brokerMode: this.config.brokerMode,
+        environment: 'LIVE',
         tradingEnabled: this.config.tradingEnabled,
         brokerConnected,
         sessionTokenPresent: sessionState.sessionTokenPresent,
         sessionValid: sessionState.sessionValid,
         sessionValidity: sessionState.sessionValidity,
         wsFeedStatus,
-        wsFeedHealthy: this.config.brokerMode === 'live'
-          ? sessionState.sessionValid && !!this.config.flattradeWsFeed?.isMarketDataReady()
-          : false,
+        wsFeedHealthy: sessionState.sessionValid && !!this.config.flattradeWsFeed?.isMarketDataReady(),
         accountStateUncertain: this.reconciler.isAccountStateUncertain,
         openPositionsCount: openPositions.length,
         memoryRssMb: Math.round(memoryUsage.rss / (1024 * 1024)),
@@ -410,20 +424,60 @@ export class HttpServer {
         return;
       }
 
-      // Generate 30-day device-bound JWT
-      const token = jwt.sign(
-        { sub: 'scalpx-owner', role: 'owner', deviceId },
-        this.config.jwtSecret,
-        { algorithm: 'HS256', expiresIn: '30d' }
-      );
-
       await this.stateStore.authorizeDevice(deviceId, deviceName);
 
       return {
         status: 'ok',
-        token,
         deviceId,
-        expiresAt: Date.now() + 30 * 24 * 3600 * 1000,
+        deviceStatus: 'AUTHORIZED',
+      };
+    });
+
+    this.app.post('/api/auth/device/authenticate', async (request, reply) => {
+      const parsed = DeviceAuthenticationSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: 'Provide a device UUID and six-digit TOTP.' });
+        return;
+      }
+      const { deviceId, totp, deviceName } = parsed.data;
+      const now = Date.now();
+      const key = `${request.ip}:${deviceId}`;
+      const previous = this.deviceAuthFailures.get(key);
+      if (previous && previous.windowEndsAt > now && previous.count >= 5) {
+        reply.code(429).send({ error: 'Too many authentication attempts. Wait five minutes and try again.' });
+        return;
+      }
+      if (!this.config.deviceTotpSecret) {
+        reply.code(503).send({ error: 'Device TOTP authentication is not configured on the backend.' });
+        return;
+      }
+      if (await this.stateStore.isDeviceRevoked(deviceId)) {
+        reply.code(401).send({ error: 'Device authorization has been revoked.' });
+        return;
+      }
+      if (!(await this.stateStore.isDeviceAuthorized(deviceId))) {
+        reply.code(403).send({ error: 'Device is not pre-authorized.' });
+        return;
+      }
+      const step = matchingTotpStep(this.config.deviceTotpSecret, totp, now);
+      if (step === null || !(await this.stateStore.consumeDeviceTotpStep(deviceId, step))) {
+        this.deviceAuthFailures.set(key, !previous || previous.windowEndsAt <= now
+          ? { count: 1, windowEndsAt: now + 5 * 60_000 }
+          : { ...previous, count: previous.count + 1 });
+        reply.code(401).send({ error: 'Invalid or already-used TOTP.' });
+        return;
+      }
+      this.deviceAuthFailures.delete(key);
+      const accessToken = jwt.sign(
+        { sub: 'scalpx-owner', role: 'owner', deviceId },
+        this.config.jwtSecret,
+        { algorithm: 'HS256', expiresIn: '15m' }
+      );
+      return {
+        status: 'ok',
+        accessToken,
+        expiresIn: 900,
+        device: { id: deviceId, name: deviceName, status: 'AUTHORIZED' },
       };
     });
 
@@ -441,67 +495,23 @@ export class HttpServer {
     // Authenticated API Endpoints
     // -------------------------------------------------------------
 
-    // Get Login URL (Fallback)
+    // The broker's documented authorization step is browser-based.
     this.app.get('/api/auth/login-url', async () => {
       return { loginUrl: this.sessionService.getLoginUrl() };
     });
 
-    // Single-User Daily OTP Login (Primary)
-    this.app.post('/api/auth/daily-login', async (request, reply) => {
-      const parsed = DailyOtpSchema.safeParse(request.body);
-      if (!parsed.success) {
-        reply.code(400).send({
-          error: 'OTP must be a 6-digit numeric string',
-          details: parsed.error.issues,
-        });
-        return;
-      }
-
-      try {
-        const result = await this.sessionService.loginWithDailyOtp(parsed.data.otp);
-        return {
-          status: 'ok',
-          message: 'Daily Flattrade authentication successful',
-          brokerConnected: true,
-          tradeDate: result.tradeDate,
-          tokenGeneratedAt: result.tokenGeneratedAt,
-        };
-      } catch (err: unknown) {
-        if (err instanceof CooldownActiveError) {
-          reply.code(429).send({
-            error: err.message,
-            remainingSec: err.remainingSec,
-          });
-          return;
-        }
-
-        if (err instanceof InvalidOtpError) {
-          reply.code(401).send({
-            error: 'Invalid OTP or authentication failed. Check the current OTP and try again.',
-          });
-          return;
-        }
-
-        if (err instanceof FallbackRequiredError) {
-          reply.code(502).send({
-            error: 'Browser fallback required: Flattrade requires browser authentication for this attempt.',
-            fallbackRequired: true,
-          });
-          return;
-        }
-
-        if (err instanceof TokenExchangeError || err instanceof AuthSessionFailedError) {
-          reply.code(502).send({
-            error: 'Flattrade authentication is temporarily unavailable. Retry later.',
-          });
-          return;
-        }
-
-        this.app.log.error('Daily Flattrade authentication failed');
-        reply.code(502).send({
-          error: 'Daily Flattrade authentication failed. Retry or use browser authentication.',
-        });
-      }
+    this.app.get('/api/app/config', async (request) => {
+      const session = await this.sessionService.getSessionState();
+      const feed = this.config.flattradeWsFeed;
+      const brokerConnected = session.sessionValid && !!feed?.isAuthenticatedConnection();
+      return {
+        environment: 'LIVE',
+        trading: { mode: 'LIVE', enabled: this.config.tradingEnabled, authorized: false },
+        broker: { connected: brokerConnected, sessionValidity: session.sessionValidity },
+        marketFeed: { connected: !!feed?.isTransportConnected(), status: feed?.getConnectionState() ?? 'DISCONNECTED' },
+        device: { id: (request as any).deviceId, status: 'AUTHORIZED' },
+        features: { optionsTrading: false, positions: true, orderManagement: true },
+      };
     });
 
     // Flattrade Authentication & Session Status Endpoint
@@ -509,26 +519,18 @@ export class HttpServer {
       const sessionState = await this.sessionService.getSessionState();
       const sessionValid = sessionState.sessionValid;
       const wsFeed = this.config.flattradeWsFeed;
-      const wsFeedStatus = this.config.brokerMode === 'paper'
-        ? 'PAPER_MODE'
-        : wsFeed?.getConnectionState() ?? 'DISCONNECTED';
-      const wsTransportConnected = this.config.brokerMode === 'paper' ? false : !!wsFeed?.isTransportConnected();
-      const wsAuthenticated = this.config.brokerMode === 'paper' ? false : !!wsFeed?.isAuthenticatedConnection();
-      const marketDataReady = this.config.brokerMode === 'paper'
-        ? false
-        : sessionValid && wsTransportConnected && wsAuthenticated && !!wsFeed?.isMarketDataReady();
-      const brokerConnected = this.config.brokerMode === 'paper' ? false : sessionValid && wsAuthenticated;
+      const wsFeedStatus = wsFeed?.getConnectionState() ?? 'DISCONNECTED';
+      const wsTransportConnected = !!wsFeed?.isTransportConnected();
+      const wsAuthenticated = !!wsFeed?.isAuthenticatedConnection();
+      const marketDataReady = sessionValid && wsTransportConnected && wsAuthenticated && !!wsFeed?.isMarketDataReady();
+      const brokerConnected = sessionValid && wsAuthenticated;
       const wsFeedHealthy = marketDataReady;
 
       let status = 'AUTHENTICATION_REQUIRED';
-      if (this.sessionService.isAuthenticating()) {
-        status = 'AUTHENTICATING';
-      } else if (sessionState.sessionValidity === 'INVALID') {
-        status = this.sessionService.getLastAuthError() ? 'AUTHENTICATION_FAILED' : 'AUTHENTICATION_REQUIRED';
+      if (sessionState.sessionValidity === 'INVALID') {
+        status = 'AUTHENTICATION_REQUIRED';
       } else if (sessionState.sessionValidity === 'UNKNOWN') {
         status = 'SESSION_VALIDATION_UNAVAILABLE';
-      } else if (this.config.brokerMode === 'paper') {
-        status = 'PAPER_MODE';
       } else if (marketDataReady) {
         status = 'FEED_READY';
       } else if (wsAuthenticated) {
@@ -552,8 +554,32 @@ export class HttpServer {
         wsFeedStatus,
         accountStateUncertain: this.reconciler.isAccountStateUncertain,
         tradeDate: getTodayDateIST(),
-        brokerMode: this.config.brokerMode,
+        environment: 'LIVE',
         tradingEnabled: this.config.tradingEnabled,
+      };
+    });
+
+    this.app.get('/api/market-data/sensex', async (_request, reply) => {
+      let instrumentId: string;
+      try {
+        instrumentId = await this.sessionService.getSensexSpotInstrumentId();
+      } catch {
+        reply.code(503);
+        return { index: 'SENSEX', exchange: 'BSE', status: 'INSTRUMENT_UNAVAILABLE', spotLtpPaise: null, timestamp: null };
+      }
+      const tick = this.config.flattradeWsFeed?.getLatestTick(instrumentId) ?? null;
+      const ageMs = tick ? Math.max(0, Date.now() - tick.timestamp) : null;
+      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000;
+      return {
+        index: 'SENSEX',
+        exchange: 'BSE',
+        token: instrumentId.split('|')[1],
+        status: fresh ? 'READY' : tick ? 'STALE' : 'WAITING_FOR_TICK',
+        spotLtpPaise: fresh ? tick!.ltpPaise : null,
+        timestamp: fresh ? tick!.timestamp : null,
+        ageMs,
+        marketDataReady: fresh && !!this.config.flattradeWsFeed?.isAuthenticatedConnection(),
+        validation: 'TOKEN_FROM_FLATTRADE_GETINDEXLIST',
       };
     });
 
@@ -572,99 +598,16 @@ export class HttpServer {
       // nonzero underlying midpoint. This service has no instrument-master
       // lookup for the index token, so calling it with bare "SENSEX" and "0"
       // would be an unsupported request and could not establish a fresh ATM.
-      if (this.config.brokerMode === 'live') {
-        reply.code(503).send({ error: 'Live option chain is unavailable until a validated instrument master and fresh underlying quote are configured.' });
-        return;
-      }
-
-      if (this.broker.getOptionChain) {
-        const rawChain = await this.broker.getOptionChain(exch, symbol, '0', parsed.data.strikes);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const chain = rawChain as any;
-        if (chain && Array.isArray(chain.strikes)) {
-          return {
-            ...chain,
-            dataSource: this.config.brokerMode === 'paper' ? 'SIMULATED' : 'BROKER',
-            simulated: this.config.brokerMode === 'paper',
-          };
-        }
-      }
-
-      return { symbol, expiry: '', strikes: [], dataSource: 'SIMULATED', simulated: true };
+      reply.code(503).send({ error: `Live ${exch} option chain is unavailable until an authoritative instrument master and fresh quotes are configured.` });
     });
 
-    // 1-Click Order Execution — blocked when TRADING_ENABLED=false
+    // 1-Click Order Execution — fail closed while authoritative contracts are unavailable
     this.app.post('/api/orders/one-click', async (request, reply) => {
       const blocked = this.tradingBlockedReason();
-      if (blocked) {
-        reply.code(403).send({ error: blocked });
-        return;
-      }
-
+      if (blocked) return reply.code(403).send({ error: blocked });
       const parsed = OneClickOrderSchema.safeParse(request.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: 'Validation failed', details: parsed.error.issues });
-        return;
-      }
-
-      const body = parsed.data;
-      if (this.config.brokerMode === 'live') {
-        reply.code(503).send({ error: 'Live orders are blocked until token, trading symbol, expiry, and lot size can be verified against the authoritative instrument master.' });
-        return;
-      }
-      const totalQty = body.lots * body.lotSize;
-
-      // Fetch quote for current LTP
-      const quote = await this.broker.getQuotes(body.exchange, body.token);
-      const parsedLtp = Number.parseFloat(quote.lp ?? '');
-      if (quote.stat !== 'Ok' || !Number.isFinite(parsedLtp) || parsedLtp <= 0) {
-        reply.code(422).send({ error: 'A valid live broker quote is required before placing an order.' });
-        return;
-      }
-      const ltpPaise = Math.round(parsedLtp * 100);
-      const bestAskPaise = quote.sp1 ? Math.round(parseFloat(quote.sp1) * 100) : undefined;
-
-      const ladderConfig = body.ladderConfig ?? {
-        stepSizePaise: 500, // 5.00
-        breakoutBufferPaise: 100, // 1.00
-        slippageBufferPaise: 150, // 1.50
-      };
-
-      try {
-        const pos = await this.orderManager.enterPosition({
-          commandId: body.commandId,
-          token: body.token,
-          symbol: body.tradingSymbol,
-          exchange: body.exchange,
-          quantity: totalQty,
-          ltpPaise,
-          bestAskPaise,
-          stepSizePaise: ladderConfig.stepSizePaise,
-          breakoutBufferPaise: ladderConfig.breakoutBufferPaise,
-          slippageBufferPaise: ladderConfig.slippageBufferPaise,
-          nextMilestonePaise: ladderConfig.firstMilestonePaise,
-          initialSlTriggerPaise: body.initialSlPoints ? ltpPaise - Math.round(body.initialSlPoints * 100) : undefined,
-          initialSlLimitPaise: body.initialSlPoints ? ltpPaise - Math.round((body.initialSlPoints + 1.5) * 100) : undefined,
-        });
-
-        // Broadcast immediate event
-        this.wsHub?.broadcastEvent('ORDER_FILLED', {
-          token: pos.token,
-          symbol: pos.symbol,
-          entryPricePaise: pos.entryPricePaise,
-          quantity: pos.quantity,
-        });
-
-        return pos;
-      } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        this.wsHub?.broadcastEvent('ORDER_REJECTED', {
-          token: body.token,
-          symbol: body.tradingSymbol,
-          reason: errMsg,
-        });
-        reply.code(422).send({ error: errMsg });
-      }
+      if (!parsed.success) return reply.code(400).send({ error: 'Validation failed', details: parsed.error.issues });
+      return reply.code(503).send({ error: 'Order entry is unavailable until authoritative instrument validation and live quote readiness are implemented.' });
     });
 
     // Live Edit Ladder Milestone & Buffers

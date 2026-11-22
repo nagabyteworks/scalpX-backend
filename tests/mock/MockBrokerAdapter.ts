@@ -1,18 +1,18 @@
-import type { BrokerPort } from '../../domain/ports/BrokerPort.js';
+import type { BrokerPort } from '../../src/domain/ports/BrokerPort.js';
 import type {
   PlaceOrderIntent,
   ModifyOrderIntent,
   CancelOrderIntent,
   OrderResult,
   OrderStatus,
-} from '../../domain/models/OrderIntent.js';
-import type { Tick } from '../../domain/models/Tick.js';
+} from '../../src/domain/models/OrderIntent.js';
+import type { Tick } from '../../src/domain/models/Tick.js';
 import type {
   FlattradeOrderBookItem,
   FlattradePosition,
   FlattradeQuote,
-} from './FlattradeProtocol.js';
-import { fromPaise } from '../../domain/models/Money.js';
+} from '../../src/adapters/broker/FlattradeProtocol.js';
+import { fromPaise } from '../../src/domain/models/Money.js';
 
 export interface PaperOrder {
   orderId: string;
@@ -34,7 +34,7 @@ export interface PaperOrder {
 export type OrderFilledListener = (order: PaperOrder) => void;
 
 /**
- * PaperBrokerAdapter
+ * MockBrokerAdapter
  *
  * Simulates strict NSE exchange rules:
  * 1. Rejects Sell SL-LMT if triggerPrice >= currentLtp (trigger must be strictly below LTP).
@@ -43,7 +43,7 @@ export type OrderFilledListener = (order: PaperOrder) => void;
  * 4. Fills Sell SL-LMT when tick hits <= triggerPrice and >= price.
  * 5. Leaves SL open if price gaps straight below limit price (flash crash gap-down unfilled limit).
  */
-export class PaperBrokerAdapter implements BrokerPort {
+export class MockBrokerAdapter implements BrokerPort {
   private readonly orders = new Map<string, PaperOrder>();
   private readonly currentLtpMap = new Map<string, number>();
   private orderSeq = 0;

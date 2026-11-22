@@ -12,6 +12,7 @@ export const FLATTRADE_ENDPOINTS = {
   ORDER_BOOK: '/OrderBook',
   POSITION_BOOK: '/PositionBook',
   LIMITS: '/Limits',
+  GET_INDEX_LIST: '/GetIndexList',
   GET_OPTION_CHAIN: '/GetOptionChain',
   GET_QUOTES: '/GetQuotes',
 } as const;
@@ -111,6 +112,8 @@ export interface FlattradeQuote {
   v?: string;
   emsg?: string;
 }
+
+export interface FlattradeIndexEntry { idxname: string; token: string }
 
 export interface OrderUpdateEvent {
   norenordno: string;

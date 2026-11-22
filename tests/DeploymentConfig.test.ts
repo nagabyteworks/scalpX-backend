@@ -25,5 +25,9 @@ describe('deployment configuration safety', () => {
     expect(deployScript).toContain("--exclude '/data/'");
     expect(deployScript).toContain('http://127.0.0.1:3000/health/live');
     expect(deployScript).toContain('sudo systemctl is-active --quiet flattrade-engine');
+    expect(deployScript).toContain('BACKUP_DIR="${DATA_DIR}/deploy-backups"');
+    expect(deployScript).toContain('sudo tar -czf');
+    expect(deployScript).toContain('rollback()');
+    expect(deployScript).toContain('sudo rsync -a --delete');
   });
 });

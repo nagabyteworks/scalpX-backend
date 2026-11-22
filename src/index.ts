@@ -3,9 +3,8 @@ import { loadConfig } from './config/env.js';
 import { SqliteStateStore } from './adapters/persistence/SqliteStateStore.js';
 import { RiskGuard } from './domain/engines/RiskGuard.js';
 import { RatchetLadderEngine } from './domain/engines/RatchetLadderEngine.js';
-import { FlattradeRestAdapter, createBrokerAdapter } from './adapters/broker/FlattradeRestAdapter.js';
+import { FlattradeRestAdapter } from './adapters/broker/FlattradeRestAdapter.js';
 import { FlattradeWsAdapter } from './adapters/broker/FlattradeWsAdapter.js';
-import { FlattradeAuthClient } from './adapters/broker/FlattradeAuthClient.js';
 import { SessionService } from './application/SessionService.js';
 import { OrderManager } from './application/OrderManager.js';
 import { ReconcilerService } from './application/ReconcilerService.js';
@@ -16,7 +15,7 @@ import { ClientWsHub } from './adapters/transport/ClientWsHub.js';
 const env = loadConfig();
 
 async function bootstrap() {
-  console.log(`🚀 Bootstrapping scalpX Backend (Mode: ${env.BROKER_MODE.toUpperCase()}, Trading: ${env.TRADING_ENABLED ? 'ENABLED' : 'DISABLED'})`);
+  console.log(`🚀 Bootstrapping scalpX Backend (LIVE, Trading: ${env.TRADING_ENABLED ? 'ENABLED' : 'DISABLED'})`);
 
   // 2. Initialize SQLite State Store (with encryption in LIVE mode)
   const stateStore = new SqliteStateStore(env.DB_PATH, env.DB_SESSION_ENCRYPTION_KEY);
@@ -31,8 +30,7 @@ async function bootstrap() {
   );
 
   // 4. Initialize Broker Adapter
-  const broker = createBrokerAdapter({
-    mode: env.BROKER_MODE,
+  const broker = new FlattradeRestAdapter({
     apiKey: env.FLATTRADE_API_KEY,
     apiSecret: env.FLATTRADE_API_SECRET,
     userId: env.FLATTRADE_USER_ID,
@@ -62,8 +60,7 @@ async function bootstrap() {
 
   // 7. Initialize Flattrade WebSocket Feed
   let flattradeWs: FlattradeWsAdapter | undefined;
-  if (env.BROKER_MODE === 'live') {
-    flattradeWs = new FlattradeWsAdapter({
+  flattradeWs = new FlattradeWsAdapter({
       wsUrl: env.FLATTRADE_WS_URL,
       userId: env.FLATTRADE_USER_ID,
       accountId: env.FLATTRADE_ACCOUNT_ID,
@@ -75,29 +72,18 @@ async function bootstrap() {
       engine.onTick(tick).catch(() => {});
     });
 
-    flattradeWs.onStatus((status) => {
+  flattradeWs.onStatus((status) => {
       if (status === 'FEED_STALE') {
         clientWsHub.broadcastEvent('FEED_STALE', { message: 'Feed tick silence exceeded 3,000 ms' });
       }
-    });
-  }
-
-  // 8. Session, Order, and Reconciler Services
-  const authClient = new FlattradeAuthClient({
-    userId: env.FLATTRADE_USER_ID,
-    passwordSha256: env.FLATTRADE_PASSWORD_SHA256,
-    apiKey: env.FLATTRADE_API_KEY,
-    apiSecret: env.FLATTRADE_API_SECRET,
-    authBaseUrl: env.FLATTRADE_AUTH_BASE_URL,
   });
 
+  // 8. Session, Order, and Reconciler Services
   const sessionService = new SessionService(
-    broker instanceof FlattradeRestAdapter ? broker : (broker as unknown as FlattradeRestAdapter),
+    broker,
     stateStore,
     env.FLATTRADE_API_KEY,
     {
-      brokerMode: env.BROKER_MODE,
-      authClient,
       wsFeed: flattradeWs,
       wsHub: clientWsHub,
     }
@@ -133,7 +119,7 @@ async function bootstrap() {
       }
     }
   } else {
-    console.log('ℹ️ No active session for today. Complete OTP login via POST /api/auth/daily-login or OAuth via /api/auth/flattrade/callback.');
+    console.log('ℹ️ No active session for today. Complete browser authorization through GET /api/auth/login-url and the registered OAuth callback.');
   }
 
   // 10. Start Fastify HTTP Server
@@ -141,7 +127,7 @@ async function bootstrap() {
     {
       jwtSecret: env.APP_JWT_SECRET,
       enrollmentSecret: env.DEVICE_ENROLLMENT_SECRET,
-      brokerMode: env.BROKER_MODE,
+      deviceTotpSecret: env.DEVICE_TOTP_SECRET,
       tradingEnabled: env.TRADING_ENABLED,
       flattradeWsFeed: flattradeWs,
       // CORS: set to your Android app's origin or leave false for no CORS
@@ -183,7 +169,6 @@ async function bootstrap() {
     try {
       clientWsHub.close();
       flattradeWs?.destroy();
-      await authClient.close().catch(() => {});
       stateStore.close();
       await server.close();
       console.log('✅ All components cleanly stopped. Goodbye.');

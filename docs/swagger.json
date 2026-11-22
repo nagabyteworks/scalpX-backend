@@ -42,10 +42,19 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["status", "timestamp"],
+                  "required": [
+                    "status",
+                    "timestamp"
+                  ],
                   "properties": {
-                    "status": { "type": "string", "example": "live" },
-                    "timestamp": { "type": "string", "format": "date-time" }
+                    "status": {
+                      "type": "string",
+                      "example": "live"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
                   }
                 }
               }
@@ -66,13 +75,34 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["status", "brokerConnected", "wsFeedHealthy", "accountStateUncertain", "timestamp"],
+                  "required": [
+                    "status",
+                    "brokerConnected",
+                    "wsFeedHealthy",
+                    "accountStateUncertain",
+                    "timestamp"
+                  ],
                   "properties": {
-                    "status": { "type": "string", "example": "ready" },
-                    "brokerConnected": { "type": "boolean", "example": true },
-                    "wsFeedHealthy": { "type": "boolean", "example": true },
-                    "accountStateUncertain": { "type": "boolean", "example": false },
-                    "timestamp": { "type": "string", "format": "date-time" }
+                    "status": {
+                      "type": "string",
+                      "example": "ready"
+                    },
+                    "brokerConnected": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "wsFeedHealthy": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "accountStateUncertain": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
                   }
                 }
               }
@@ -84,13 +114,34 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["status", "brokerConnected", "wsFeedHealthy", "accountStateUncertain", "timestamp"],
+                  "required": [
+                    "status",
+                    "brokerConnected",
+                    "wsFeedHealthy",
+                    "accountStateUncertain",
+                    "timestamp"
+                  ],
                   "properties": {
-                    "status": { "type": "string", "example": "not_ready" },
-                    "brokerConnected": { "type": "boolean", "example": false },
-                    "wsFeedHealthy": { "type": "boolean", "example": false },
-                    "accountStateUncertain": { "type": "boolean", "example": false },
-                    "timestamp": { "type": "string", "format": "date-time" }
+                    "status": {
+                      "type": "string",
+                      "example": "not_ready"
+                    },
+                    "brokerConnected": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "wsFeedHealthy": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "accountStateUncertain": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
                   }
                 }
               }
@@ -128,14 +179,18 @@
             "name": "request_code",
             "in": "query",
             "required": true,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Authorization request code passed by Flattrade OAuth redirect"
           },
           {
             "name": "code",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Legacy fallback authorization code parameter"
           }
         ],
@@ -162,13 +217,17 @@
             "name": "request_code",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "code",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -183,7 +242,9 @@
         "summary": "Owner Device Provisioning",
         "description": "Enrolls a new client device by verifying the high-entropy enrollment secret configured on EC2. Issues a 30-day device-bound JWT.",
         "security": [
-          { "DeviceIdAuth": [] }
+          {
+            "DeviceIdAuth": []
+          }
         ],
         "requestBody": {
           "required": true,
@@ -206,10 +267,18 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/400BadRequest" },
-          "401": { "$ref": "#/components/responses/401Unauthorized" },
-          "403": { "$ref": "#/components/responses/403Forbidden" },
-          "429": { "$ref": "#/components/responses/429TooManyRequests" }
+          "400": {
+            "$ref": "#/components/responses/400BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/403Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/429TooManyRequests"
+          }
         }
       }
     },
@@ -223,9 +292,14 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["deviceId"],
+                "required": [
+                  "deviceId"
+                ],
                 "properties": {
-                  "deviceId": { "type": "string", "format": "uuid" }
+                  "deviceId": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
                 }
               }
             }
@@ -239,15 +313,24 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "status": { "type": "string", "example": "ok" },
-                    "message": { "type": "string" }
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
                   }
                 }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/400BadRequest" },
-          "401": { "$ref": "#/components/responses/401Unauthorized" }
+          "400": {
+            "$ref": "#/components/responses/400BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
+          }
         }
       }
     },
@@ -262,49 +345,22 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["loginUrl"],
+                  "required": [
+                    "loginUrl"
+                  ],
                   "properties": {
-                    "loginUrl": { "type": "string", "format": "uri" }
+                    "loginUrl": {
+                      "type": "string",
+                      "format": "uri"
+                    }
                   }
                 }
               }
             }
           },
-          "401": { "$ref": "#/components/responses/401Unauthorized" }
-        }
-      }
-    },
-    "/api/auth/daily-login": {
-      "post": {
-        "summary": "Daily Broker OTP Authentication",
-        "description": "Submits the morning 6-digit SMS OTP or TOTP. The server executes the 3-step Flattrade auth chain from its static IPv4 EC2 instance to establish the daily session.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["otp"],
-                "properties": {
-                  "otp": { "type": "string", "pattern": "^[0-9]{6}$", "example": "123456" }
-                }
-              }
-            }
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
           }
-        },
-        "responses": {
-          "200": {
-            "description": "Daily login successful and session established",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DailyLoginResponse"
-                }
-              }
-            }
-          },
-          "400": { "$ref": "#/components/responses/400BadRequest" },
-          "401": { "$ref": "#/components/responses/401Unauthorized" }
         }
       }
     },
@@ -323,7 +379,9 @@
               }
             }
           },
-          "401": { "$ref": "#/components/responses/401Unauthorized" }
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
+          }
         }
       }
     },
@@ -336,21 +394,29 @@
             "name": "symbol",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "default": "NIFTY" },
+            "schema": {
+              "type": "string",
+              "default": "NIFTY"
+            },
             "description": "Underlying symbol"
           },
           {
             "name": "expiry",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Expiry date format (e.g., 26-NOV-2026)"
           },
           {
             "name": "strikes",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "default": 10 },
+            "schema": {
+              "type": "integer",
+              "default": 10
+            },
             "description": "Number of strikes above and below ATM"
           }
         ],
@@ -365,7 +431,9 @@
               }
             }
           },
-          "401": { "$ref": "#/components/responses/401Unauthorized" }
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
+          }
         }
       }
     },
@@ -394,8 +462,12 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/400BadRequest" },
-          "401": { "$ref": "#/components/responses/401Unauthorized" },
+          "400": {
+            "$ref": "#/components/responses/400BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
+          },
           "403": {
             "description": "Order entry blocked (TRADING_ENABLED=false)",
             "content": {
@@ -428,7 +500,9 @@
             "name": "token",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Instrument exchange token"
           }
         ],
@@ -491,8 +565,12 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/400BadRequest" },
-          "500": { "$ref": "#/components/responses/500InternalError" }
+          "400": {
+            "$ref": "#/components/responses/400BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/500InternalError"
+          }
         }
       }
     },
@@ -528,9 +606,19 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "success": { "type": "boolean", "example": false },
-                    "message": { "type": "string" },
-                    "errors": { "type": "array", "items": { "type": "string" } }
+                    "success": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "errors": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
                   }
                 }
               }
@@ -567,9 +655,87 @@
             "description": "OpenAPI specification document",
             "content": {
               "application/json": {
-                "schema": { "type": "object" }
+                "schema": {
+                  "type": "object"
+                }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/auth/device/authenticate": {
+      "post": {
+        "summary": "Authenticate a pre-authorized device using backend TOTP",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "deviceId",
+                  "totp"
+                ],
+                "properties": {
+                  "deviceId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "totp": {
+                    "type": "string",
+                    "pattern": "^[0-9]{6}$"
+                  },
+                  "deviceName": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Short-lived device access token issued"
+          },
+          "401": {
+            "description": "Invalid TOTP or device is not authorized"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          },
+          "503": {
+            "description": "Backend TOTP secret is not configured"
+          }
+        }
+      }
+    },
+    "/api/app/config": {
+      "get": {
+        "summary": "Read backend-owned configuration and operational status",
+        "responses": {
+          "200": {
+            "description": "Non-secret backend configuration for the authenticated device"
+          },
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/market-data/sensex": {
+      "get": {
+        "summary": "Read dynamically resolved SENSEX spot status",
+        "responses": {
+          "200": {
+            "description": "Latest fresh spot price or explicit waiting/stale status"
+          },
+          "401": {
+            "$ref": "#/components/responses/401Unauthorized"
+          },
+          "503": {
+            "description": "Broker token or quote unavailable"
           }
         }
       }
@@ -594,207 +760,580 @@
       "HealthResponse": {
         "type": "object",
         "required": [
-          "status", "brokerMode", "brokerConnected", "wsFeedHealthy",
-          "wsFeedStatus", "tradingEnabled", "accountStateUncertain",
-          "openPositionsCount", "memoryRssMb", "uptimeSec", "timestamp"
+          "status",
+          "environment",
+          "tradingEnabled",
+          "brokerConnected",
+          "sessionTokenPresent",
+          "sessionValid",
+          "sessionValidity",
+          "wsFeedStatus",
+          "wsFeedHealthy",
+          "accountStateUncertain",
+          "openPositionsCount",
+          "uptimeSec",
+          "timestamp"
         ],
         "properties": {
-          "status": { "type": "string", "example": "ok" },
-          "brokerMode": { "type": "string", "enum": ["paper", "live"], "example": "paper" },
-          "brokerConnected": { "type": "boolean", "example": true },
-          "wsFeedHealthy": { "type": "boolean", "example": true },
-          "wsFeedStatus": { "type": "string", "enum": ["FEED_CONNECTED", "FEED_CONNECTING", "FEED_DISCONNECTED", "FEED_STALE"] },
-          "tradingEnabled": { "type": "boolean", "example": false },
-          "accountStateUncertain": { "type": "boolean", "example": false },
-          "openPositionsCount": { "type": "integer", "example": 0 },
-          "memoryRssMb": { "type": "integer", "example": 68 },
-          "uptimeSec": { "type": "integer", "example": 1420 },
-          "timestamp": { "type": "string", "format": "date-time" }
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "brokerConnected": {
+            "type": "boolean",
+            "example": true
+          },
+          "wsFeedHealthy": {
+            "type": "boolean",
+            "example": true
+          },
+          "wsFeedStatus": {
+            "type": "string",
+            "enum": [
+              "FEED_CONNECTED",
+              "FEED_CONNECTING",
+              "FEED_DISCONNECTED",
+              "FEED_STALE"
+            ]
+          },
+          "tradingEnabled": {
+            "type": "boolean",
+            "example": false
+          },
+          "accountStateUncertain": {
+            "type": "boolean",
+            "example": false
+          },
+          "openPositionsCount": {
+            "type": "integer",
+            "example": 0
+          },
+          "memoryRssMb": {
+            "type": "integer",
+            "example": 68
+          },
+          "uptimeSec": {
+            "type": "integer",
+            "example": 1420
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "LIVE"
+            ],
+            "example": "LIVE"
+          }
         }
       },
       "ProvisionDeviceRequest": {
         "type": "object",
-        "required": ["enrollmentSecret"],
+        "required": [
+          "enrollmentSecret"
+        ],
         "properties": {
-          "enrollmentSecret": { "type": "string", "description": "High-entropy secret configured on server (/etc/scalpx/env)" },
-          "deviceName": { "type": "string", "default": "Android Device" }
+          "enrollmentSecret": {
+            "type": "string",
+            "description": "High-entropy secret configured on server (/etc/scalpx/env)"
+          },
+          "deviceName": {
+            "type": "string",
+            "default": "Android Device"
+          }
         }
       },
       "ProvisionDeviceResponse": {
         "type": "object",
-        "required": ["status", "token", "deviceId", "expiresAt"],
+        "required": [
+          "status",
+          "deviceId",
+          "deviceStatus"
+        ],
         "properties": {
-          "status": { "type": "string", "example": "ok" },
-          "token": { "type": "string", "description": "30-day device-bound JWT" },
-          "deviceId": { "type": "string", "format": "uuid" },
-          "expiresAt": { "type": "integer", "example": 1735000000000 }
-        }
-      },
-      "DailyLoginResponse": {
-        "type": "object",
-        "required": ["status", "message", "brokerConnected"],
-        "properties": {
-          "status": { "type": "string", "example": "ok" },
-          "message": { "type": "string" },
-          "brokerConnected": { "type": "boolean", "example": true },
-          "tradeDate": { "type": "string", "example": "2026-11-22" }
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceStatus": {
+            "type": "string",
+            "enum": [
+              "AUTHORIZED"
+            ],
+            "example": "AUTHORIZED"
+          }
         }
       },
       "AuthStatusResponse": {
         "type": "object",
-        "required": ["status", "brokerConnected", "sessionTokenPresent", "sessionValid", "sessionValidity", "wsTransportConnected", "wsAuthenticated", "marketDataReady", "wsFeedHealthy", "wsFeedStatus", "tradeDate", "brokerMode", "tradingEnabled"],
+        "required": [
+          "status",
+          "brokerConnected",
+          "sessionTokenPresent",
+          "sessionValid",
+          "sessionValidity",
+          "wsTransportConnected",
+          "wsAuthenticated",
+          "marketDataReady",
+          "wsFeedHealthy",
+          "wsFeedStatus",
+          "tradeDate",
+          "tradingEnabled",
+          "environment"
+        ],
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["AUTHENTICATION_REQUIRED", "AUTHENTICATING", "AUTHENTICATED", "WEBSOCKET_CONNECTING", "WEBSOCKET_DISCONNECTED", "SESSION_VALIDATION_UNAVAILABLE", "PAPER_MODE", "FEED_READY", "AUTHENTICATION_FAILED"],
+            "enum": [
+              "AUTHENTICATION_REQUIRED",
+              "AUTHENTICATING",
+              "AUTHENTICATED",
+              "WEBSOCKET_CONNECTING",
+              "WEBSOCKET_DISCONNECTED",
+              "SESSION_VALIDATION_UNAVAILABLE",
+              "FEED_READY",
+              "AUTHENTICATION_FAILED"
+            ],
             "example": "AUTHENTICATED"
           },
-          "brokerConnected": { "type": "boolean", "example": true },
-          "sessionTokenPresent": { "type": "boolean", "example": true },
-          "sessionValid": { "type": "boolean", "example": true },
-          "sessionValidity": { "type": "string", "enum": ["VALID", "INVALID", "UNKNOWN", "SIMULATED"], "example": "VALID" },
-          "wsTransportConnected": { "type": "boolean", "example": true },
-          "wsAuthenticated": { "type": "boolean", "example": true },
-          "marketDataReady": { "type": "boolean", "example": false },
-          "wsFeedHealthy": { "type": "boolean", "example": true },
-          "wsFeedStatus": { "type": "string", "example": "CONNECTED" },
-          "tradeDate": { "type": "string", "example": "2026-11-22" },
-          "brokerMode": { "type": "string", "example": "live" },
-          "tradingEnabled": { "type": "boolean", "example": false }
+          "brokerConnected": {
+            "type": "boolean",
+            "example": true
+          },
+          "sessionTokenPresent": {
+            "type": "boolean",
+            "example": true
+          },
+          "sessionValid": {
+            "type": "boolean",
+            "example": true
+          },
+          "sessionValidity": {
+            "type": "string",
+            "enum": [
+              "VALID",
+              "INVALID",
+              "UNKNOWN"
+            ],
+            "example": "VALID"
+          },
+          "wsTransportConnected": {
+            "type": "boolean",
+            "example": true
+          },
+          "wsAuthenticated": {
+            "type": "boolean",
+            "example": true
+          },
+          "marketDataReady": {
+            "type": "boolean",
+            "example": false
+          },
+          "wsFeedHealthy": {
+            "type": "boolean",
+            "example": true
+          },
+          "wsFeedStatus": {
+            "type": "string",
+            "example": "CONNECTED"
+          },
+          "tradeDate": {
+            "type": "string",
+            "example": "2026-11-22"
+          },
+          "tradingEnabled": {
+            "type": "boolean",
+            "example": false
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "LIVE"
+            ],
+            "example": "LIVE"
+          }
         }
       },
       "OptionStrike": {
         "type": "object",
-        "required": ["strikePrice"],
+        "required": [
+          "strikePrice"
+        ],
         "properties": {
-          "strikePrice": { "type": "number", "example": 24500 },
-          "ceToken": { "type": "string", "nullable": true, "example": "26000" },
-          "ceSymbol": { "type": "string", "nullable": true, "example": "NIFTY26NOV24500CE" },
-          "ceLtpPaise": { "type": "integer", "nullable": true, "example": 10500 },
-          "peToken": { "type": "string", "nullable": true, "example": "26001" },
-          "peSymbol": { "type": "string", "nullable": true, "example": "NIFTY26NOV24500PE" },
-          "peLtpPaise": { "type": "integer", "nullable": true, "example": 9800 }
+          "strikePrice": {
+            "type": "number",
+            "example": 24500
+          },
+          "ceToken": {
+            "type": "string",
+            "nullable": true,
+            "example": "26000"
+          },
+          "ceSymbol": {
+            "type": "string",
+            "nullable": true,
+            "example": "NIFTY26NOV24500CE"
+          },
+          "ceLtpPaise": {
+            "type": "integer",
+            "nullable": true,
+            "example": 10500
+          },
+          "peToken": {
+            "type": "string",
+            "nullable": true,
+            "example": "26001"
+          },
+          "peSymbol": {
+            "type": "string",
+            "nullable": true,
+            "example": "NIFTY26NOV24500PE"
+          },
+          "peLtpPaise": {
+            "type": "integer",
+            "nullable": true,
+            "example": 9800
+          }
         }
       },
       "OptionChainResponse": {
         "type": "object",
-        "required": ["symbol", "expiry", "strikes"],
+        "required": [
+          "symbol",
+          "expiry",
+          "strikes"
+        ],
         "properties": {
-          "symbol": { "type": "string", "example": "NIFTY" },
-          "expiry": { "type": "string", "example": "26-NOV-2026" },
-          "strikes": { "type": "array", "items": { "$ref": "#/components/schemas/OptionStrike" } }
+          "symbol": {
+            "type": "string",
+            "example": "NIFTY"
+          },
+          "expiry": {
+            "type": "string",
+            "example": "26-NOV-2026"
+          },
+          "strikes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OptionStrike"
+            }
+          }
         }
       },
       "LadderConfig": {
         "type": "object",
-        "required": ["stepSizePaise", "breakoutBufferPaise", "slippageBufferPaise"],
+        "required": [
+          "stepSizePaise",
+          "breakoutBufferPaise",
+          "slippageBufferPaise"
+        ],
         "properties": {
-          "firstMilestonePaise": { "type": "integer", "nullable": true, "example": 11000 },
-          "stepSizePaise": { "type": "integer", "example": 500 },
-          "breakoutBufferPaise": { "type": "integer", "example": 100 },
-          "slippageBufferPaise": { "type": "integer", "example": 150 }
+          "firstMilestonePaise": {
+            "type": "integer",
+            "nullable": true,
+            "example": 11000
+          },
+          "stepSizePaise": {
+            "type": "integer",
+            "example": 500
+          },
+          "breakoutBufferPaise": {
+            "type": "integer",
+            "example": 100
+          },
+          "slippageBufferPaise": {
+            "type": "integer",
+            "example": 150
+          }
         }
       },
       "OneClickOrderRequest": {
         "type": "object",
-        "required": ["commandId", "token", "tradingSymbol", "lots", "lotSize"],
+        "required": [
+          "commandId",
+          "token",
+          "tradingSymbol",
+          "lots",
+          "lotSize"
+        ],
         "properties": {
-          "commandId": { "type": "string", "format": "uuid" },
-          "token": { "type": "string", "example": "26000" },
-          "tradingSymbol": { "type": "string", "example": "NIFTY26NOV24500CE" },
-          "exchange": { "type": "string", "default": "NFO" },
-          "side": { "type": "string", "enum": ["BUY", "SELL"], "default": "BUY" },
-          "lots": { "type": "integer", "minimum": 1, "example": 2 },
-          "lotSize": { "type": "integer", "minimum": 1, "example": 25 },
-          "product": { "type": "string", "enum": ["I", "M"], "default": "I" },
-          "initialSlPoints": { "type": "number", "nullable": true, "example": 10.0 },
-          "ladderConfig": { "$ref": "#/components/schemas/LadderConfig" }
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "token": {
+            "type": "string",
+            "example": "26000"
+          },
+          "tradingSymbol": {
+            "type": "string",
+            "example": "NIFTY26NOV24500CE"
+          },
+          "exchange": {
+            "type": "string",
+            "default": "NFO"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "default": "BUY"
+          },
+          "lots": {
+            "type": "integer",
+            "minimum": 1,
+            "example": 2
+          },
+          "lotSize": {
+            "type": "integer",
+            "minimum": 1,
+            "example": 25
+          },
+          "product": {
+            "type": "string",
+            "enum": [
+              "I",
+              "M"
+            ],
+            "default": "I"
+          },
+          "initialSlPoints": {
+            "type": "number",
+            "nullable": true,
+            "example": 10
+          },
+          "ladderConfig": {
+            "$ref": "#/components/schemas/LadderConfig"
+          }
         }
       },
       "LadderPosition": {
         "type": "object",
         "required": [
-          "token", "symbol", "side", "quantity", "entryPricePaise",
-          "nextMilestonePaise", "stepSizePaise", "breakoutBufferPaise",
-          "slippageBufferPaise", "status", "isPaused"
+          "token",
+          "symbol",
+          "side",
+          "quantity",
+          "entryPricePaise",
+          "nextMilestonePaise",
+          "stepSizePaise",
+          "breakoutBufferPaise",
+          "slippageBufferPaise",
+          "status",
+          "isPaused"
         ],
         "properties": {
-          "token": { "type": "string", "example": "26000" },
-          "symbol": { "type": "string", "example": "NIFTY26NOV24500CE" },
-          "side": { "type": "string", "example": "BUY" },
-          "quantity": { "type": "integer", "example": 50 },
-          "entryPricePaise": { "type": "integer", "example": 10005 },
-          "nextMilestonePaise": { "type": "integer", "example": 11000 },
-          "stepSizePaise": { "type": "integer", "example": 500 },
-          "breakoutBufferPaise": { "type": "integer", "example": 100 },
-          "slippageBufferPaise": { "type": "integer", "example": 150 },
-          "activeSlOrderId": { "type": "string", "nullable": true, "example": "FT_SL_991" },
-          "activeSlTriggerPaise": { "type": "integer", "nullable": true, "example": 9005 },
-          "activeSlLimitPaise": { "type": "integer", "nullable": true, "example": 8855 },
-          "status": { "type": "string", "example": "OPEN" },
-          "isPaused": { "type": "boolean", "example": false }
+          "token": {
+            "type": "string",
+            "example": "26000"
+          },
+          "symbol": {
+            "type": "string",
+            "example": "NIFTY26NOV24500CE"
+          },
+          "side": {
+            "type": "string",
+            "example": "BUY"
+          },
+          "quantity": {
+            "type": "integer",
+            "example": 50
+          },
+          "entryPricePaise": {
+            "type": "integer",
+            "example": 10005
+          },
+          "nextMilestonePaise": {
+            "type": "integer",
+            "example": 11000
+          },
+          "stepSizePaise": {
+            "type": "integer",
+            "example": 500
+          },
+          "breakoutBufferPaise": {
+            "type": "integer",
+            "example": 100
+          },
+          "slippageBufferPaise": {
+            "type": "integer",
+            "example": 150
+          },
+          "activeSlOrderId": {
+            "type": "string",
+            "nullable": true,
+            "example": "FT_SL_991"
+          },
+          "activeSlTriggerPaise": {
+            "type": "integer",
+            "nullable": true,
+            "example": 9005
+          },
+          "activeSlLimitPaise": {
+            "type": "integer",
+            "nullable": true,
+            "example": 8855
+          },
+          "status": {
+            "type": "string",
+            "example": "OPEN"
+          },
+          "isPaused": {
+            "type": "boolean",
+            "example": false
+          }
         }
       },
       "PatchLadderRequest": {
         "type": "object",
         "properties": {
-          "nextMilestonePaise": { "type": "integer", "nullable": true },
-          "stepSizePaise": { "type": "integer", "nullable": true },
-          "breakoutBufferPaise": { "type": "integer", "nullable": true },
-          "slippageBufferPaise": { "type": "integer", "nullable": true },
-          "paused": { "type": "boolean", "nullable": true }
+          "nextMilestonePaise": {
+            "type": "integer",
+            "nullable": true
+          },
+          "stepSizePaise": {
+            "type": "integer",
+            "nullable": true
+          },
+          "breakoutBufferPaise": {
+            "type": "integer",
+            "nullable": true
+          },
+          "slippageBufferPaise": {
+            "type": "integer",
+            "nullable": true
+          },
+          "paused": {
+            "type": "boolean",
+            "nullable": true
+          }
         }
       },
       "ExitPositionRequest": {
         "type": "object",
-        "required": ["commandId", "token"],
+        "required": [
+          "commandId",
+          "token"
+        ],
         "properties": {
-          "commandId": { "type": "string", "format": "uuid" },
-          "token": { "type": "string", "example": "26000" }
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "token": {
+            "type": "string",
+            "example": "26000"
+          }
         }
       },
       "ExitPositionResponse": {
         "type": "object",
-        "required": ["success", "token", "commandId", "orderId", "status"],
+        "required": [
+          "success",
+          "token",
+          "commandId",
+          "orderId",
+          "status"
+        ],
         "properties": {
-          "success": { "type": "boolean", "example": true },
-          "token": { "type": "string", "example": "26000" },
-          "commandId": { "type": "string", "format": "uuid" },
-          "orderId": { "type": "string", "example": "FT_ORD_EXIT_26000" },
-          "status": { "type": "string", "example": "FILLED" }
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "token": {
+            "type": "string",
+            "example": "26000"
+          },
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orderId": {
+            "type": "string",
+            "example": "FT_ORD_EXIT_26000"
+          },
+          "status": {
+            "type": "string",
+            "example": "FILLED"
+          }
         }
       },
       "ExitAllRequest": {
         "type": "object",
-        "required": ["commandId"],
+        "required": [
+          "commandId"
+        ],
         "properties": {
-          "commandId": { "type": "string", "format": "uuid" }
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "ExitAllResponse": {
         "type": "object",
-        "required": ["success", "message"],
+        "required": [
+          "success",
+          "message"
+        ],
         "properties": {
-          "success": { "type": "boolean", "example": true },
-          "message": { "type": "string", "example": "Panic exit executed for all open positions" }
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "message": {
+            "type": "string",
+            "example": "Panic exit executed for all open positions"
+          }
         }
       },
       "TodayTradesResponse": {
         "type": "object",
-        "required": ["activePositions", "openPositionsCount", "timestamp"],
+        "required": [
+          "activePositions",
+          "openPositionsCount",
+          "timestamp"
+        ],
         "properties": {
-          "activePositions": { "type": "array", "items": { "$ref": "#/components/schemas/LadderPosition" } },
-          "openPositionsCount": { "type": "integer", "example": 1 },
-          "timestamp": { "type": "integer", "example": 1732174200000 }
+          "activePositions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LadderPosition"
+            }
+          },
+          "openPositionsCount": {
+            "type": "integer",
+            "example": 1
+          },
+          "timestamp": {
+            "type": "integer",
+            "example": 1732174200000
+          }
         }
       },
       "ApiError": {
         "type": "object",
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
-          "error": { "type": "string" },
-          "message": { "type": "string" },
-          "code": { "type": "string" }
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
         }
       }
     },
@@ -803,7 +1342,9 @@
         "description": "Validation error or invalid request payload",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ApiError" }
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
           }
         }
       },
@@ -811,7 +1352,9 @@
         "description": "Missing, invalid, or expired JWT, or device ID mismatch",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ApiError" }
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
           }
         }
       },
@@ -819,7 +1362,9 @@
         "description": "Forbidden operation (e.g. trading disabled or device revoked)",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ApiError" }
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
           }
         }
       },
@@ -827,7 +1372,9 @@
         "description": "Rate limit exceeded",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ApiError" }
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
           }
         }
       },
@@ -835,7 +1382,9 @@
         "description": "Internal server error or unhandled broker failure",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ApiError" }
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
           }
         }
       }

@@ -7,6 +7,7 @@ REMOTE_DIR="/opt/scalpx"
 SERVICE_NAME="flattrade-engine"
 ENV_FILE="/etc/scalpx/env"
 DATA_DIR="/var/lib/scalpx"
+BACKUP_DIR="${DATA_DIR}/deploy-backups"
 
 if [[ -z "${EC2_HOST}" || "${EC2_HOST}" == *YOUR_EC2* ]]; then
   echo "Set EC2_HOST to the deployment host before running this script." >&2
@@ -36,8 +37,13 @@ ssh "${EC2_HOST}" << EOF
   test -r '${ENV_FILE}'
   test -d '${DATA_DIR}'
   test -w '${DATA_DIR}'
+  sudo install -d -m 0750 -o "\$(stat -c '%U' '${REMOTE_DIR}')" -g "\$(stat -c '%G' '${REMOTE_DIR}')" '${BACKUP_DIR}'
   test "\$(sudo systemctl show '${SERVICE_NAME}' -p WorkingDirectory --value)" = '${REMOTE_DIR}'
 EOF
+
+# Capture the current deployable tree outside REMOTE_DIR before rsync --delete.
+BACKUP_NAME="scalpx-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+ssh "${EC2_HOST}" "sudo tar -czf '${BACKUP_DIR}/${BACKUP_NAME}' --exclude='./node_modules' --exclude='./.git' --exclude='./.env' --exclude='./.env.*' --exclude='./data' --exclude='*.db' --exclude='*.db-*' --exclude='*.sqlite' --exclude='*.sqlite-*' --exclude='*.log' -C '${REMOTE_DIR}' . && sudo chown \$(stat -c '%U:%G' '${REMOTE_DIR}') '${BACKUP_DIR}/${BACKUP_NAME}'"
 
 # Step 3: Rsync to AWS EC2 t4g.micro
 echo "🚀 Syncing files to AWS EC2 instance (${EC2_HOST})..."
@@ -56,8 +62,22 @@ rsync -avz --delete-delay \
 
 # Step 4: Remote npm ci and service restart
 echo "🔄 Running remote installation and restarting systemd service..."
-ssh "${EC2_HOST}" << 'EOF'
+ssh "${EC2_HOST}" "BACKUP_PATH='${BACKUP_DIR}/${BACKUP_NAME}' bash -s" << 'EOF'
   set -euo pipefail
+  rollback() {
+    echo "Deployment failed; restoring ${BACKUP_PATH}." >&2
+    restore_dir="$(mktemp -d)"
+    sudo tar -xzf "${BACKUP_PATH}" -C "${restore_dir}"
+    sudo rsync -a --delete \
+      --exclude='node_modules/' --exclude='.env' --exclude='.env.*' \
+      --exclude='*.db' --exclude='*.db-*' --exclude='*.sqlite' --exclude='*.sqlite-*' \
+      --exclude='*.log' --exclude='data/' "${restore_dir}/" /opt/scalpx/
+    rm -rf "${restore_dir}"
+    cd /opt/scalpx
+    npm ci --omit=dev || true
+    sudo systemctl restart flattrade-engine || true
+  }
+  trap 'rollback' ERR
   cd /opt/scalpx
   npm ci --omit=dev
   sudo systemctl restart flattrade-engine
@@ -71,7 +91,7 @@ ssh "${EC2_HOST}" << 'EOF'
   done
   sudo systemctl status flattrade-engine --no-pager
   echo "Health check failed after 60 seconds." >&2
-  exit 1
+  false
 EOF
 
 echo "========================================================"

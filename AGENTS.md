@@ -13,11 +13,8 @@
 - **Marketable Limit Orders:** Every "1-click market" buy/sell must be converted to a `LMT` order priced slightly across the spread using live LTP/depth + configurable buffer, rounded to `0.05` tick size.
 - **Rate Limit:** Strictly under 10 orders/second. Enforce a client-side priority token bucket capped at **6 order/modify calls per second** where `EXIT_ALL` preempts routine `SL-LMT` ratchet updates.
 - **Static IP & Secrets:** Daily OAuth token exchange and all order calls run strictly from this server. Never log `api_secret` or raw `jKey` session tokens.
-- **Single-User Daily OTP Login Rules:**
-  - **Primary Daily Auth Flow (Server-Side 3-Step OTP/TOTP):**
-    - Static credentials (`FLATTRADE_USER_ID`, `FLATTRADE_PASSWORD_SHA256`, `FLATTRADE_API_KEY`, `FLATTRADE_API_SECRET`, `FLATTRADE_REDIRECT_URL`) are stored strictly in `/etc/flattrade-engine/env` (`chmod 600`) on EC2—NEVER hardcoded in TypeScript source files or committed to Git.
-    - The backend exposes `POST /api/auth/daily-login` accepting `{ otp: string }` (6-digit SMS OTP or TOTP) from the authenticated Android client and executes all three Flattrade auth calls (`/auth/session` -> `/ftauth` -> `/trade/apitoken`) directly from the EC2 Static IPv4.
-  - **Mandatory Fallback:** Keep `GET /api/auth/login-url` and `GET /auth/flattrade/callback` intact as a fallback browser OAuth path in case Flattrade ever triggers CAPTCHA or changes `/ftauth`.
+- **Flattrade Login:** Use only the documented browser authorization and callback request-code token exchange. `GET /api/auth/login-url` and the callback endpoints are the supported broker login flow. Do not implement direct OTP automation, browser automation, `/auth/session`, or `/ftauth` calls.
+  - Backend TOTP is solely for authenticating a pre-authorized Android device to scalpX. Keep `DEVICE_TOTP_SECRET` on the backend and never send it to Flattrade.
   - **Strict Secret Redaction:** NEVER log `FLATTRADE_PASSWORD_SHA256`, `FLATTRADE_API_SECRET`, incoming `otp`, `request_code`, or the resulting `jKey` session token in Fastify logs, SQLite `order_audit_log`, or error responses.
 
 ## 3. Financial Math & Concurrency Invariants

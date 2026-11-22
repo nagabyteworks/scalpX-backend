@@ -16,6 +16,14 @@ class MockRiskPersistence {
   }
 }
 
+function todayInIst(): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 describe('RiskGuard with Persistence', () => {
   let riskGuard: RiskGuard;
 
@@ -27,7 +35,7 @@ describe('RiskGuard with Persistence', () => {
     const persistence = new MockRiskPersistence();
 
     // Simulate a previous session that recorded a loss
-    const today = new Date().toISOString().split('T')[0]!;
+    const today = todayInIst();
     persistence.saveRiskStateSync({
       tradeDate: today,
       realizedPnlPaise: -40000, // -400 INR
@@ -46,7 +54,7 @@ describe('RiskGuard with Persistence', () => {
 
   it('restores kill switch state from persistence and blocks new orders', () => {
     const persistence = new MockRiskPersistence();
-    const today = new Date().toISOString().split('T')[0]!;
+    const today = todayInIst();
     persistence.saveRiskStateSync({
       tradeDate: today,
       realizedPnlPaise: -100000,

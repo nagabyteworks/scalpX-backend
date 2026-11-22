@@ -4,7 +4,7 @@ import WebSocket from 'ws';
 import jwt from 'jsonwebtoken';
 import { ClientWsHub } from '../../src/adapters/transport/ClientWsHub.js';
 import { RatchetLadderEngine } from '../../src/domain/engines/RatchetLadderEngine.js';
-import { PaperBrokerAdapter } from '../../src/adapters/broker/PaperBrokerAdapter.js';
+import { MockBrokerAdapter } from '../mock/MockBrokerAdapter.js';
 import type { AddressInfo } from 'node:net';
 
 describe('ClientWsHub Throttled WebSocket Integration', () => {
@@ -17,7 +17,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
 
   beforeEach(async () => {
     server = http.createServer();
-    const broker = new PaperBrokerAdapter();
+    const broker = new MockBrokerAdapter();
     engine = new RatchetLadderEngine(broker);
 
     hub = new ClientWsHub(

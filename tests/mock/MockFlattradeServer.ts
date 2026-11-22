@@ -7,9 +7,6 @@ export interface MockServerOptions {
   expectedApiKey?: string;
   expectedApiSecretHash?: string;
   sessionToken?: string;
-  mockSid?: string;
-  invalidOtp?: boolean;
-  requireFallback?: boolean;
   sessionInvalid?: boolean;
   acknowledgeSubscriptions?: boolean;
 }
@@ -27,18 +24,12 @@ export class MockFlattradeServer {
 
   private port = 0;
   public sessionToken: string;
-  public mockSid: string;
-  public invalidOtp: boolean;
-  public requireFallback: boolean;
   public sessionInvalid: boolean;
   public acknowledgeSubscriptions: boolean;
   public expectedApiKey?: string;
 
   constructor(options: MockServerOptions = {}) {
     this.sessionToken = options.sessionToken ?? 'MOCK_SESSION_TOKEN_ABC';
-    this.mockSid = options.mockSid ?? 'MOCK_SID_12345';
-    this.invalidOtp = options.invalidOtp ?? false;
-    this.requireFallback = options.requireFallback ?? false;
     this.sessionInvalid = options.sessionInvalid ?? false;
     this.acknowledgeSubscriptions = options.acknowledgeSubscriptions ?? true;
     this.expectedApiKey = options.expectedApiKey;
@@ -108,39 +99,16 @@ export class MockFlattradeServer {
       return;
     }
 
-    // A. Flattrade Auth Step 1: Session ID
-    if (url.includes('/auth/session')) {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end(this.mockSid);
+    if (url.endsWith('/GetIndexList')) {
+      const params = new URLSearchParams(body);
+      const payload = params.get('jData');
+      const requestData = payload ? JSON.parse(payload) as { exch?: string } : {};
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // Test fixture only. This is deliberately not a production token or live-broker evidence.
+      res.end(JSON.stringify(requestData.exch === 'BSE'
+        ? { stat: 'Ok', values: [{ idxname: 'SENSEX', token: '987654321' }] }
+        : { stat: 'Ok', values: [] }));
       return;
-    }
-
-    // B. Flattrade Auth Step 2: ftauth
-    if (url.includes('/ftauth')) {
-      try {
-        const json = JSON.parse(body);
-        if (this.invalidOtp || json.PAN_DOB === '999999') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ emsg: 'Invalid OTP' }));
-          return;
-        }
-        if (this.requireFallback || json.PAN_DOB === '888888') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ RedirectURL: 'http://127.0.0.1:3000/auth/flattrade/callback' }));
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            RedirectURL: 'http://127.0.0.1:3000/auth/flattrade/callback?code=MOCK_AUTH_CODE_XYZ',
-          })
-        );
-        return;
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ emsg: 'Malformed JSON' }));
-        return;
-      }
     }
 
     // 1. OAuth apitoken

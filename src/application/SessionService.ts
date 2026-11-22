@@ -1,6 +1,5 @@
 import type { FlattradeRestAdapter } from '../adapters/broker/FlattradeRestAdapter.js';
 import type { StateStorePort } from '../domain/ports/StateStorePort.js';
-import type { FlattradeAuthClient } from '../adapters/broker/FlattradeAuthClient.js';
 import type { FlattradeWsAdapter } from '../adapters/broker/FlattradeWsAdapter.js';
 import type { ReconcilerService } from './ReconcilerService.js';
 import type { ClientWsHub } from '../adapters/transport/ClientWsHub.js';
@@ -21,26 +20,13 @@ export function getTodayDateIST(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
-export class CooldownActiveError extends Error {
-  public readonly remainingSec: number;
-
-  constructor(remainingSec: number) {
-    super(`Too many failed login attempts. Retry after ${remainingSec} seconds.`);
-    this.name = 'CooldownActiveError';
-    this.remainingSec = remainingSec;
-  }
-}
-
 export interface SessionServiceOptions {
-  brokerMode?: 'paper' | 'live';
-  authClient?: FlattradeAuthClient;
   wsFeed?: FlattradeWsAdapter;
   reconciler?: ReconcilerService;
   wsHub?: ClientWsHub;
-  cooldownMs?: number; // default: 15,000 (15 seconds)
 }
 
-export type SessionValidity = 'VALID' | 'INVALID' | 'UNKNOWN' | 'SIMULATED';
+export type SessionValidity = 'VALID' | 'INVALID' | 'UNKNOWN';
 
 export interface SessionState {
   sessionTokenPresent: boolean;
@@ -52,16 +38,12 @@ export class SessionService {
   private readonly broker: FlattradeRestAdapter;
   private readonly stateStore: StateStorePort;
   private readonly apiKey: string;
-  private readonly brokerMode: 'paper' | 'live';
-  private authClient?: FlattradeAuthClient;
   private wsFeed?: FlattradeWsAdapter;
   private reconciler?: ReconcilerService;
   private wsHub?: ClientWsHub;
+  private sensexIndexToken: string | null = null;
+  private sensexIndexResolvedDate: string | null = null;
 
-  private readonly cooldownMs: number;
-  private cooldownUntil = 0;
-  private authenticating = false;
-  private lastAuthError: string | null = null;
   private sessionValidationCache: { token: string; checkedAt: number; validity: SessionValidity } | null = null;
 
   constructor(
@@ -73,26 +55,12 @@ export class SessionService {
     this.broker = broker;
     this.stateStore = stateStore;
     this.apiKey = apiKey;
-    this.brokerMode = options.brokerMode ?? 'paper';
-    this.authClient = options.authClient;
     this.wsFeed = options.wsFeed;
     this.reconciler = options.reconciler;
     this.wsHub = options.wsHub;
-    this.cooldownMs = options.cooldownMs ?? 15000;
-  }
-
-  isAuthenticating(): boolean {
-    return this.authenticating;
-  }
-
-  getLastAuthError(): string | null {
-    return this.lastAuthError;
   }
 
   hasValidSession(): boolean {
-    if (this.brokerMode === 'paper') {
-      return true;
-    }
     return !!this.sessionValidationCache &&
       this.sessionValidationCache.validity === 'VALID' &&
       Date.now() - this.sessionValidationCache.checkedAt < 15000 &&
@@ -108,10 +76,6 @@ export class SessionService {
   }
 
   async getSessionState(): Promise<SessionState> {
-    if (this.brokerMode === 'paper') {
-      return { sessionTokenPresent: !!this.getSessionToken(), sessionValid: true, sessionValidity: 'SIMULATED' };
-    }
-
     const token = this.getSessionToken();
     if (!token) return { sessionTokenPresent: false, sessionValid: false, sessionValidity: 'INVALID' };
 
@@ -135,10 +99,6 @@ export class SessionService {
       : 'UNKNOWN';
     this.sessionValidationCache = { token, checkedAt: now, validity };
     return { sessionTokenPresent: true, sessionValid: validity === 'VALID', sessionValidity: validity };
-  }
-
-  setAuthClient(authClient: FlattradeAuthClient): void {
-    this.authClient = authClient;
   }
 
   setWsFeed(wsFeed: FlattradeWsAdapter): void {
@@ -167,26 +127,55 @@ export class SessionService {
     return this.getLoginUrl();
   }
 
+  async getSensexSpotInstrumentId(): Promise<string> {
+    const tradeDate = getTodayDateIST();
+    if (!this.sensexIndexToken || this.sensexIndexResolvedDate !== tradeDate) {
+      const indices = await this.broker.getIndexList('BSE');
+      const matches = indices.filter((index) => index.idxname.trim().toUpperCase() === 'SENSEX');
+      if (matches.length !== 1 || !/^\d+$/.test(matches[0]!.token)) {
+        this.sensexIndexToken = null;
+        this.sensexIndexResolvedDate = null;
+        throw new Error('Flattrade BSE index list did not return one valid SENSEX token.');
+      }
+      this.sensexIndexToken = matches[0]!.token;
+      this.sensexIndexResolvedDate = tradeDate;
+    }
+    return `BSE|${this.sensexIndexToken}`;
+  }
+
+  private async ensureSensexSpotSubscription(): Promise<void> {
+    if (!this.wsFeed) return;
+    const instrumentId = await this.getSensexSpotInstrumentId();
+    await this.wsFeed.subscribe([instrumentId]);
+  }
+
   /**
    * Exchanges OAuth request_code for session token, persists to SQLite, and updates broker client.
    */
   async exchangeAndSaveToken(requestCode: string): Promise<string> {
-    let token: string;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (this.brokerMode === 'paper' && typeof (this.broker as any).exchangeOAuthToken !== 'function') {
-      token = `PAPER_SESSION_${Date.now()}`;
-    } else {
-      token = await this.broker.exchangeOAuthToken(requestCode);
-    }
+    const token = await this.broker.exchangeOAuthToken(requestCode);
     const today = getTodayDateIST();
     await this.stateStore.saveDailySession(today, token);
     if (typeof this.broker.setSessionToken === 'function') {
       this.broker.setSessionToken(token);
     }
-    this.sessionValidationCache = { token, checkedAt: Date.now(), validity: 'VALID' };
+    // Do not treat a successful code exchange as proof that the issued session
+    // works. Confirm it through Flattrade's documented /Limits endpoint first.
+    this.sessionValidationCache = null;
+    const validation = await this.getSessionState();
+    if (!validation.sessionValid) {
+      throw new Error(validation.sessionValidity === 'UNKNOWN'
+        ? 'Flattrade session validation is currently unavailable.'
+        : 'Flattrade rejected the exchanged session token.');
+    }
 
     if (this.wsFeed) {
       this.wsFeed.updateSessionToken(token);
+      try {
+        await this.ensureSensexSpotSubscription();
+      } catch (err) {
+        console.warn('SENSEX index resolution failed; live spot data remains unavailable:', err instanceof Error ? err.message : 'unknown error');
+      }
       // Do not hide broker WebSocket authentication failures from the caller.
       await this.wsFeed.connect();
     }
@@ -220,92 +209,17 @@ export class SessionService {
         this.broker.setSessionToken(token);
       }
       const sessionState = await this.getSessionState();
+      if (sessionState.sessionValid) {
+        try {
+          await this.ensureSensexSpotSubscription();
+        } catch (err) {
+          console.warn('SENSEX index resolution failed; live spot data remains unavailable:', err instanceof Error ? err.message : 'unknown error');
+        }
+      }
       return sessionState.sessionValid ? token : null;
     }
     return null;
   }
 
-  /**
-   * Single-User Daily OTP/TOTP Login.
-   * Runs the 3-step server-side handshake from the EC2 static IP in live mode,
-   * or provides instant paper trading connection in paper mode.
-   * Enforces a 15-second cooldown upon any failed attempt.
-   */
-  async loginWithDailyOtp(otp: string): Promise<{ brokerConnected: true; tradeDate: string; tokenGeneratedAt: string }> {
-    const now = Date.now();
-    if (now < this.cooldownUntil) {
-      const remainingSec = Math.ceil((this.cooldownUntil - now) / 1000);
-      throw new CooldownActiveError(remainingSec);
-    }
 
-    const today = getTodayDateIST();
-    const tokenGeneratedAt = new Date().toISOString();
-
-    // Paper Mode: Instant mock session
-    if (this.brokerMode === 'paper') {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      const paperToken = `PAPER_TOKEN_${today}_${Date.now()}`;
-      await this.stateStore.saveDailySession(today, paperToken);
-      if (typeof (this.broker as any).setSessionToken === 'function') {
-        this.broker.setSessionToken(paperToken);
-      }
-      this.wsHub?.broadcastEvent('SESSION_UPDATED', { brokerConnected: true, tradeDate: today });
-      this.cooldownUntil = 0;
-      return {
-        brokerConnected: true,
-        tradeDate: today,
-        tokenGeneratedAt,
-      };
-    }
-
-    // Live Mode: Run 3-step FlattradeAuthClient handshake
-    this.authenticating = true;
-    try {
-      if (!this.authClient) {
-        throw new Error('FlattradeAuthClient is not configured for live broker mode');
-      }
-
-      const token = await this.authClient.authenticateWithDailyOtp(otp);
-
-      // Persist to SQLite WAL store
-      await this.stateStore.saveDailySession(today, token);
-
-      // Update Rest Adapter token
-      this.broker.setSessionToken(token);
-      this.sessionValidationCache = { token, checkedAt: Date.now(), validity: 'VALID' };
-
-      // Connect / Update WS Feed
-      if (this.wsFeed) {
-        this.wsFeed.updateSessionToken(token);
-        await this.wsFeed.connect();
-      }
-
-      // Reconcile open positions
-      if (this.reconciler) {
-        await this.reconciler.reconcile().catch(() => {});
-      }
-
-      // Broadcast update to mobile clients
-      if (this.wsHub) {
-        this.wsHub.broadcastEvent('SESSION_UPDATED', { brokerConnected: true, tradeDate: today });
-      }
-
-      // Success clears any cooldown and last error
-      this.cooldownUntil = 0;
-      this.lastAuthError = null;
-
-      return {
-        brokerConnected: true,
-        tradeDate: today,
-        tokenGeneratedAt,
-      };
-    } catch (err: unknown) {
-      // Activate 15-second cooldown on failure
-      this.cooldownUntil = Date.now() + this.cooldownMs;
-      this.lastAuthError = err instanceof Error ? err.message : String(err);
-      throw err;
-    } finally {
-      this.authenticating = false;
-    }
-  }
 }

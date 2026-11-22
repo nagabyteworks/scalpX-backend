@@ -136,7 +136,7 @@ paths:
   /api/auth/provision-device:
     post:
       summary: Owner Device Provisioning
-      description: Enrolls a new client device by verifying server's enrollment secret. Issues a 30-day device-bound JWT.
+      description: Pre-authorizes a device using the backend enrollment secret. Device authentication remains a separate TOTP step.
       security:
         - DeviceIdAuth: []
       requestBody:
@@ -178,6 +178,27 @@ paths:
         "400": { $ref: "#/components/responses/400BadRequest" }
         "401": { $ref: "#/components/responses/401Unauthorized" }
 
+  /api/auth/device/authenticate:
+    post:
+      summary: Authenticate an authorized device with TOTP
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, totp]
+              properties:
+                deviceId: { type: string, format: uuid }
+                totp: { type: string, pattern: '^[0-9]{6}$' }
+                deviceName: { type: string }
+      responses:
+        "200": { description: Short-lived access token issued }
+        "401": { $ref: "#/components/responses/401Unauthorized" }
+        "429": { $ref: "#/components/responses/429TooManyRequests" }
+        "503": { description: Backend TOTP authentication is not configured }
+
   /api/auth/login-url:
     get:
       summary: Get Flattrade OAuth URL
@@ -194,29 +215,6 @@ paths:
                   loginUrl: { type: string, format: uri }
         "401": { $ref: "#/components/responses/401Unauthorized" }
 
-  /api/auth/daily-login:
-    post:
-      summary: Daily Broker OTP Authentication
-      description: Submits the 6-digit morning OTP to authenticate with Flattrade from EC2.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [otp]
-              properties:
-                otp: { type: string, pattern: "^[0-9]{6}$", example: "123456" }
-      responses:
-        "200":
-          description: Session established
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/DailyLoginResponse"
-        "400": { $ref: "#/components/responses/400BadRequest" }
-        "401": { $ref: "#/components/responses/401Unauthorized" }
-
   /api/auth/status:
     get:
       summary: Check Broker Authentication Status
@@ -229,6 +227,21 @@ paths:
               schema:
                 $ref: "#/components/schemas/AuthStatusResponse"
         "401": { $ref: "#/components/responses/401Unauthorized" }
+
+  /api/app/config:
+    get:
+      summary: Read backend-owned non-secret configuration and status
+      responses:
+        "200": { description: Backend configuration visible to authenticated device }
+        "401": { $ref: "#/components/responses/401Unauthorized" }
+
+  /api/market-data/sensex:
+    get:
+      summary: Read dynamically resolved SENSEX spot status
+      responses:
+        "200": { description: Fresh spot quote or explicit waiting/stale state }
+        "401": { $ref: "#/components/responses/401Unauthorized" }
+        "503": { description: Broker instrument token or quote unavailable }
 
   /api/option-chain:
     get:
@@ -384,7 +397,7 @@ components:
       type: object
       required:
         - status
-        - brokerMode
+        - environment
         - brokerConnected
         - wsFeedHealthy
         - wsFeedStatus
@@ -396,7 +409,7 @@ components:
         - timestamp
       properties:
         status: { type: string, example: ok }
-        brokerMode: { type: string, enum: [paper, live], example: paper }
+        environment: { type: string, enum: [LIVE], example: LIVE }
         brokerConnected: { type: boolean, example: true }
         wsFeedHealthy: { type: boolean, example: true }
         wsFeedStatus: { type: string, enum: [FEED_CONNECTED, FEED_CONNECTING, FEED_DISCONNECTED, FEED_STALE] }
@@ -416,41 +429,31 @@ components:
 
     ProvisionDeviceResponse:
       type: object
-      required: [status, token, deviceId, expiresAt]
+      required: [status, deviceId, deviceStatus]
       properties:
         status: { type: string, example: ok }
-        token: { type: string }
         deviceId: { type: string, format: uuid }
-        expiresAt: { type: integer, example: 1735000000000 }
-
-    DailyLoginResponse:
-      type: object
-      required: [status, message, brokerConnected]
-      properties:
-        status: { type: string, example: ok }
-        message: { type: string }
-        brokerConnected: { type: boolean, example: true }
-        tradeDate: { type: string, example: "2026-11-22" }
+        deviceStatus: { type: string, enum: [AUTHORIZED] }
 
     AuthStatusResponse:
       type: object
-      required: [status, brokerConnected, sessionTokenPresent, sessionValid, sessionValidity, wsTransportConnected, wsAuthenticated, marketDataReady, wsFeedHealthy, wsFeedStatus, tradeDate, brokerMode, tradingEnabled]
+      required: [status, brokerConnected, sessionTokenPresent, sessionValid, sessionValidity, wsTransportConnected, wsAuthenticated, marketDataReady, wsFeedHealthy, wsFeedStatus, tradeDate, environment, tradingEnabled]
       properties:
         status:
           type: string
-          enum: [AUTHENTICATION_REQUIRED, AUTHENTICATING, AUTHENTICATED, WEBSOCKET_CONNECTING, WEBSOCKET_DISCONNECTED, SESSION_VALIDATION_UNAVAILABLE, PAPER_MODE, FEED_READY, AUTHENTICATION_FAILED]
+          enum: [AUTHENTICATION_REQUIRED, AUTHENTICATING, AUTHENTICATED, WEBSOCKET_CONNECTING, WEBSOCKET_DISCONNECTED, SESSION_VALIDATION_UNAVAILABLE, FEED_READY, AUTHENTICATION_FAILED]
           example: AUTHENTICATED
         brokerConnected: { type: boolean, example: true }
         sessionTokenPresent: { type: boolean, example: true }
         sessionValid: { type: boolean, example: true }
-        sessionValidity: { type: string, enum: [VALID, INVALID, UNKNOWN, SIMULATED], example: VALID }
+        sessionValidity: { type: string, enum: [VALID, INVALID, UNKNOWN], example: VALID }
         wsTransportConnected: { type: boolean, example: true }
         wsAuthenticated: { type: boolean, example: true }
         marketDataReady: { type: boolean, example: false }
         wsFeedHealthy: { type: boolean, example: true }
         wsFeedStatus: { type: string, example: CONNECTED }
         tradeDate: { type: string, example: "2026-11-22" }
-        brokerMode: { type: string, example: live }
+        environment: { type: string, enum: [LIVE], example: LIVE }
         tradingEnabled: { type: boolean, example: false }
 
     OptionStrike:

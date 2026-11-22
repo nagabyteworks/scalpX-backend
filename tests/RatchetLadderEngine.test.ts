@@ -1,15 +1,15 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { RatchetLadderEngine, type RatchetAlertEvent } from '../src/domain/engines/RatchetLadderEngine.js';
-import { PaperBrokerAdapter } from '../src/adapters/broker/PaperBrokerAdapter.js';
+import { MockBrokerAdapter } from './mock/MockBrokerAdapter.js';
 import type { LadderPosition } from '../src/domain/models/LadderPosition.js';
 
 describe('RatchetLadderEngine Unit Tests', () => {
-  let broker: PaperBrokerAdapter;
+  let broker: MockBrokerAdapter;
   let engine: RatchetLadderEngine;
   let alerts: RatchetAlertEvent[];
 
   beforeEach(() => {
-    broker = new PaperBrokerAdapter();
+    broker = new MockBrokerAdapter();
     engine = new RatchetLadderEngine(broker);
     alerts = [];
     engine.onAlert((a) => alerts.push(a));

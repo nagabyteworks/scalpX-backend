@@ -102,9 +102,14 @@ export class SqliteStateStore implements StateStorePort {
         device_id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        revoked_at INTEGER
+        revoked_at INTEGER,
+        last_totp_step INTEGER
       );
     `);
+    const deviceColumns = this.db.pragma('table_info(authorized_devices)') as Array<{ name: string }>;
+    if (!deviceColumns.some((column) => column.name === 'last_totp_step')) {
+      this.db.exec('ALTER TABLE authorized_devices ADD COLUMN last_totp_step INTEGER');
+    }
   }
 
   /**
@@ -277,7 +282,7 @@ export class SqliteStateStore implements StateStorePort {
   /**
    * Saves the daily session token to SQLite.
    * In LIVE mode (encryptionKeyHex provided), the token is encrypted with AES-256-GCM.
-   * In PAPER mode, stored as-is.
+   * Legacy rows from installations without encryption remain readable for migration.
    * Never logs the plaintext token.
    */
   async saveDailySession(tradeDate: string, plainToken: string): Promise<void> {
@@ -395,6 +400,18 @@ export class SqliteStateStore implements StateStorePort {
       const row = stmt.get(deviceId) as any;
       if (!row) return false;
       return row.revoked_at === null;
+    });
+  }
+
+  async consumeDeviceTotpStep(deviceId: string, step: number): Promise<boolean> {
+    return this.enqueue(() => {
+      const result = this.db.prepare(`
+        UPDATE authorized_devices
+        SET last_totp_step = ?
+        WHERE device_id = ? AND revoked_at IS NULL
+          AND (last_totp_step IS NULL OR last_totp_step < ?)
+      `).run(step, deviceId, step);
+      return result.changes === 1;
     });
   }
 
