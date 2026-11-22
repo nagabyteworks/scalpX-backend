@@ -87,6 +87,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
     engine.registerPosition({
       token: '26000',
       symbol: 'NIFTY26NOV24500CE',
+      exchange: 'NFO',
       side: 'BUY',
       quantity: 50,
       entryPricePaise: 10000,

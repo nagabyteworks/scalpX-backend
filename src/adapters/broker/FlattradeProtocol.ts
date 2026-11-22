@@ -11,6 +11,7 @@ export const FLATTRADE_ENDPOINTS = {
   CANCEL_ORDER: '/CancelOrder',
   ORDER_BOOK: '/OrderBook',
   POSITION_BOOK: '/PositionBook',
+  LIMITS: '/Limits',
   GET_OPTION_CHAIN: '/GetOptionChain',
   GET_QUOTES: '/GetQuotes',
 } as const;

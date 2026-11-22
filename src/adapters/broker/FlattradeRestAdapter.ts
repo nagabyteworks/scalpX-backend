@@ -279,6 +279,21 @@ export class FlattradeRestAdapter implements BrokerPort {
     return this.postForm<FlattradeQuote>(FLATTRADE_ENDPOINTS.GET_QUOTES, payload);
   }
 
+  /** Validate the current jKey using Flattrade's documented read-only Limits API. */
+  async validateSession(): Promise<'VALID' | 'INVALID' | 'UNKNOWN'> {
+    try {
+      const response = await this.postForm<{ stat?: string; emsg?: string }>(FLATTRADE_ENDPOINTS.LIMITS, {
+        uid: this.config.userId,
+        actid: this.config.accountId ?? this.config.userId,
+      });
+      if (response.stat === 'Ok') return 'VALID';
+      if (/session expired|invalid session key/i.test(response.emsg ?? '')) return 'INVALID';
+      return 'UNKNOWN';
+    } catch {
+      return 'UNKNOWN';
+    }
+  }
+
   async getOptionChain(exch: string, tsym: string, strprc: string, count: number): Promise<unknown> {
     const payload = {
       uid: this.config.userId,

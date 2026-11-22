@@ -24,6 +24,7 @@ describe('Deterministic Tick-Replay Test Suite (Mandatory Test Cases)', () => {
     const pos: LadderPosition = {
       token,
       symbol: 'NIFTY26NOV24500CE',
+      exchange: 'NFO',
       side: 'BUY',
       quantity: 50,
       entryPricePaise: 10000, // 100.00

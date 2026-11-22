@@ -154,6 +154,7 @@ export class OrderManager {
     const position: LadderPosition = {
       token: params.token,
       symbol: params.symbol,
+      exchange: params.exchange,
       side: 'BUY',
       quantity: params.quantity,
       entryPricePaise: fillPricePaise,
@@ -193,7 +194,7 @@ export class OrderManager {
     // Register with engine & SQLite
     this.engine.registerPosition(position);
     await this.stateStore.savePosition(position);
-    await this.feed.subscribe([params.token]);
+    await this.feed.subscribe([`${params.exchange}|${params.token}`]);
 
     this.recordIdempotency(params.commandId, position);
     return position;

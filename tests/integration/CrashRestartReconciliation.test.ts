@@ -56,6 +56,7 @@ describe('Crash-Restart Reconciliation Integration', () => {
     const ladderA: LadderPosition = {
       token: '26000',
       symbol: 'NIFTY26NOV24500CE',
+      exchange: 'NFO',
       side: 'BUY',
       quantity: 50,
       entryPricePaise: 10000,
@@ -76,6 +77,7 @@ describe('Crash-Restart Reconciliation Integration', () => {
     const ladderB: LadderPosition = {
       token: '26001',
       symbol: 'NIFTY26NOV24600CE',
+      exchange: 'NFO',
       side: 'BUY',
       quantity: 50,
       entryPricePaise: 8000,
@@ -151,7 +153,7 @@ describe('Crash-Restart Reconciliation Integration', () => {
     expect(posA.activeSlTriggerPaise).toBe(11500); // 115.00 -> 11500 paise
 
     // 6. Verify token 26000 was re-subscribed to market feed
-    expect(subscribedTokens).toContain('26000');
-    expect(subscribedTokens).not.toContain('26001');
+    expect(subscribedTokens).toContain('NFO|26000');
+    expect(subscribedTokens).not.toContain('NFO|26001');
   });
 });

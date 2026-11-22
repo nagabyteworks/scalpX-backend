@@ -29,7 +29,7 @@ describe('OAuthExchange & SessionService Integration', () => {
       authUrl: `${httpUrl}/trade/apitoken`,
     });
 
-    sessionService = new SessionService(restAdapter, stateStore, 'TEST_API_KEY_123');
+    sessionService = new SessionService(restAdapter, stateStore, 'TEST_API_KEY_123', { brokerMode: 'live' });
   });
 
   afterEach(async () => {
@@ -54,9 +54,9 @@ describe('OAuthExchange & SessionService Integration', () => {
     expect(stored).toBe('VERIFIED_SESSION_TOKEN_XYZ');
   });
 
-  it('loads today valid token on restart without re-authenticating', async () => {
+  it('loads and remotely validates today token on restart without re-authenticating', async () => {
     const today = getTodayDateIST();
-    await stateStore.saveDailySession(today, 'CACHED_SESSION_TOKEN');
+    await stateStore.saveDailySession(today, 'VERIFIED_SESSION_TOKEN_XYZ');
 
     // Create a fresh unauthenticated adapter & session service
     const freshAdapter = new FlattradeRestAdapter({
@@ -66,12 +66,33 @@ describe('OAuthExchange & SessionService Integration', () => {
       baseUrl: `${httpUrl}/PiConnectAPI`,
       authUrl: `${httpUrl}/trade/apitoken`,
     });
-    const freshSessionService = new SessionService(freshAdapter, stateStore, 'TEST_API_KEY_123');
+    const freshSessionService = new SessionService(freshAdapter, stateStore, 'TEST_API_KEY_123', { brokerMode: 'live' });
 
     const loadedToken = await freshSessionService.getValidTodaySession();
-    expect(loadedToken).toBe('CACHED_SESSION_TOKEN');
-    expect(freshAdapter.getSessionToken()).toBe('CACHED_SESSION_TOKEN');
+    expect(loadedToken).toBe('VERIFIED_SESSION_TOKEN_XYZ');
+    expect(freshAdapter.getSessionToken()).toBe('VERIFIED_SESSION_TOKEN_XYZ');
+    expect((await freshSessionService.getSessionState()).sessionValidity).toBe('VALID');
 
+    await freshAdapter.close();
+  });
+
+  it('reports a stored but remotely expired token as present and invalid', async () => {
+    const today = getTodayDateIST();
+    await stateStore.saveDailySession(today, 'OLD_BUT_STORED_TOKEN');
+    mockServer.sessionInvalid = true;
+
+    const freshAdapter = new FlattradeRestAdapter({
+      apiKey: 'TEST_API_KEY_123', apiSecret: 'SECRET_456', userId: 'FT001',
+      baseUrl: `${httpUrl}/PiConnectAPI`, authUrl: `${httpUrl}/trade/apitoken`,
+    });
+    const freshSessionService = new SessionService(freshAdapter, stateStore, 'TEST_API_KEY_123', { brokerMode: 'live' });
+    const loadedToken = await freshSessionService.getValidTodaySession();
+    expect(loadedToken).toBeNull();
+    expect(await freshSessionService.getSessionState()).toEqual({
+      sessionTokenPresent: true,
+      sessionValid: false,
+      sessionValidity: 'INVALID',
+    });
     await freshAdapter.close();
   });
 });

@@ -125,6 +125,7 @@ export class ReconcilerService {
     for (const ladder of savedLadders) {
       // Find matching position in broker PositionBook
       const brokerPos = positions.find((p) => p.token === ladder.token || p.tsym === ladder.symbol);
+      if (brokerPos?.exch) ladder.exchange = brokerPos.exch;
       const netQty = brokerPos ? parseInt(brokerPos.netqty, 10) : 0;
 
       // NaN check: a malformed netqty field must NOT be treated as 0 (closed)
@@ -136,7 +137,7 @@ export class ReconcilerService {
         uncertainTokens.push(ladder.token);
         // Keep ladder registered as OPEN in memory — do not close it
         this.engine.registerPosition(ladder);
-        tokensToSubscribe.push(ladder.token);
+        tokensToSubscribe.push(`${ladder.exchange}|${ladder.token}`);
         continue;
       }
 
@@ -180,7 +181,7 @@ export class ReconcilerService {
         ladder.status = 'OPEN';
         this.engine.registerPosition(ladder);
         await this.stateStore.savePosition(ladder);
-        tokensToSubscribe.push(ladder.token);
+        tokensToSubscribe.push(`${ladder.exchange}|${ladder.token}`);
         syncedCount++;
       }
     }

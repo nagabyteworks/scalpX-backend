@@ -10,6 +10,8 @@ export interface MockServerOptions {
   mockSid?: string;
   invalidOtp?: boolean;
   requireFallback?: boolean;
+  sessionInvalid?: boolean;
+  acknowledgeSubscriptions?: boolean;
 }
 
 export class MockFlattradeServer {
@@ -21,12 +23,15 @@ export class MockFlattradeServer {
   public positionBook: FlattradePosition[] = [];
   public orderSequence = 0;
   public receivedRequests: Array<{ url: string; body: string }> = [];
+  public subscriptionMessages: string[] = [];
 
   private port = 0;
   public sessionToken: string;
   public mockSid: string;
   public invalidOtp: boolean;
   public requireFallback: boolean;
+  public sessionInvalid: boolean;
+  public acknowledgeSubscriptions: boolean;
   public expectedApiKey?: string;
 
   constructor(options: MockServerOptions = {}) {
@@ -34,6 +39,8 @@ export class MockFlattradeServer {
     this.mockSid = options.mockSid ?? 'MOCK_SID_12345';
     this.invalidOtp = options.invalidOtp ?? false;
     this.requireFallback = options.requireFallback ?? false;
+    this.sessionInvalid = options.sessionInvalid ?? false;
+    this.acknowledgeSubscriptions = options.acknowledgeSubscriptions ?? true;
     this.expectedApiKey = options.expectedApiKey;
 
     this.httpServer = http.createServer((req, res) => {
@@ -65,7 +72,17 @@ export class MockFlattradeServer {
           }
           // Touchline subscription
           if (parsed.t === 't') {
-            ws.send(JSON.stringify({ t: 'tk', stat: 'Ok' }));
+            const subscriptions = String(parsed.k ?? '');
+            this.subscriptionMessages.push(subscriptions);
+            if (this.acknowledgeSubscriptions) {
+              for (const instrumentId of subscriptions.split('#').filter(Boolean)) {
+                const [exchange, token] = instrumentId.split('|');
+                ws.send(JSON.stringify({ t: 'tk', e: exchange, tk: token, lp: '100.00' }));
+              }
+            }
+          }
+          if (parsed.t === 'u') {
+            this.subscriptionMessages.push(`UNSUB:${String(parsed.k ?? '')}`);
           }
         } catch {
           // Ignore
@@ -80,6 +97,16 @@ export class MockFlattradeServer {
 
   private handleHttp(req: http.IncomingMessage, res: http.ServerResponse, body: string, _options: MockServerOptions): void {
     const url = req.url ?? '';
+
+    if (url.endsWith('/Limits')) {
+      const suppliedToken = new URLSearchParams(body).get('jKey');
+      const valid = !this.sessionInvalid && suppliedToken === this.sessionToken;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(valid
+        ? { stat: 'Ok', cash: '1000.00' }
+        : { stat: 'Not_Ok', emsg: 'Session Expired : Invalid Session Key' }));
+      return;
+    }
 
     // A. Flattrade Auth Step 1: Session ID
     if (url.includes('/auth/session')) {
@@ -214,9 +241,10 @@ export class MockFlattradeServer {
     });
   }
 
-  broadcastTick(token: string, lp: string, bp1 = '99.95', sp1 = '100.05'): void {
+  broadcastTick(exchange: string, token: string, lp: string, bp1 = '99.95', sp1 = '100.05'): void {
     const msg = JSON.stringify({
       t: 'tk',
+      e: exchange,
       tk: token,
       lp,
       bp1,

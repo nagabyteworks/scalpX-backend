@@ -7,6 +7,8 @@ scalpX is a single-user options trading cockpit. The Android app is a thin clien
 ## Changes in this review
 
 - `/api/auth/status` now reports session validity, WebSocket transport, broker WebSocket authentication, and fresh market-data readiness independently. A token in SQLite does not prove connectivity. `FEED_READY` requires a fresh tick for every subscribed token; disconnected and reconnecting states cannot report authenticated or ready.
+- LIVE session validity is checked against the current trade-date token and Flattrade's documented, read-only [`/Limits` API](https://pi.flattrade.in/docs), cached for 15 seconds. An unavailable broker response is reported as `UNKNOWN`, while Flattrade's explicit expired/invalid-session response is `INVALID`.
+- Broker subscriptions now require `EXCHANGE|TOKEN` keys. Positions preserve exchange in SQLite and reconnection uses the same qualified instrument ID.
 - Flattrade `ck: NOT_OK` now rejects the pending WebSocket connection instead of leaving the login request unresolved. Feed freshness is cleared on disconnect and re-evaluated after reconnection.
 - Paper quotes require a simulated tick. The adapter no longer invents a default LTP or a SENSEX/NIFTY option chain, expiry, token, trading symbol, or option LTP.
 - LIVE option-chain requests and order entries fail closed until the service has authoritative instrument-master validation and a fresh underlying quote. LIVE entry order validation therefore cannot accept paper-mode or unverified token/symbol/expiry/lot-size metadata.
@@ -19,7 +21,7 @@ The project currently has no instrument-master download, parser, cache, or SENSE
 
 ## Test status
 
-- Backend: `npm test` — 107 tests passed across 18 files, including localhost HTTP/WebSocket binding; `npm run typecheck` passed.
-- Android: `./gradlew testDebugUnitTest assembleDebug` passed, including unit tests and debug APK assembly.
+- Backend: `npm test` — 110 tests passed across 18 files, including localhost HTTP/WebSocket binding; `npm run typecheck` passed.
+- Android: `./gradlew testDebugUnitTest assembleDebug` passed, including 31 unit tests and debug APK assembly.
 
-Tests cover fresh per-token tick readiness, stale-feed reconnect, broker WebSocket auth rejection, live auth state transitions, unavailable LIVE instrument data, paper-mode empty contracts, and no paper quote fallback. Production credentials, EC2, and execution enablement were not touched.
+Tests cover valid and expired stored sessions through `/Limits`, fresh per-token tick readiness, stale-feed reconnect, BFO/NFO subscriptions and resubscriptions, broker WebSocket auth rejection, live auth state transitions, unavailable LIVE instrument data, paper-mode empty contracts, and no paper quote fallback. Production credentials, EC2, and execution enablement were not touched.

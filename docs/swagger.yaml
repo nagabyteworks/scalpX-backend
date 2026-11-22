@@ -220,7 +220,7 @@ paths:
   /api/auth/status:
     get:
       summary: Check Broker Authentication Status
-      description: Returns current broker session authentication and WebSocket feed readiness status.
+      description: Reports session-token presence and validation, WebSocket transport and authentication, and fresh market-data readiness.
       responses:
         "200":
           description: Authentication and feed status
@@ -434,13 +434,19 @@ components:
 
     AuthStatusResponse:
       type: object
-      required: [status, brokerConnected, wsFeedHealthy, wsFeedStatus, tradeDate, brokerMode, tradingEnabled]
+      required: [status, brokerConnected, sessionTokenPresent, sessionValid, sessionValidity, wsTransportConnected, wsAuthenticated, marketDataReady, wsFeedHealthy, wsFeedStatus, tradeDate, brokerMode, tradingEnabled]
       properties:
         status:
           type: string
-          enum: [AUTHENTICATION_REQUIRED, AUTHENTICATING, AUTHENTICATED, WEBSOCKET_CONNECTING, FEED_READY, AUTHENTICATION_FAILED]
-          example: FEED_READY
+          enum: [AUTHENTICATION_REQUIRED, AUTHENTICATING, AUTHENTICATED, WEBSOCKET_CONNECTING, WEBSOCKET_DISCONNECTED, SESSION_VALIDATION_UNAVAILABLE, PAPER_MODE, FEED_READY, AUTHENTICATION_FAILED]
+          example: AUTHENTICATED
         brokerConnected: { type: boolean, example: true }
+        sessionTokenPresent: { type: boolean, example: true }
+        sessionValid: { type: boolean, example: true }
+        sessionValidity: { type: string, enum: [VALID, INVALID, UNKNOWN, SIMULATED], example: VALID }
+        wsTransportConnected: { type: boolean, example: true }
+        wsAuthenticated: { type: boolean, example: true }
+        marketDataReady: { type: boolean, example: false }
         wsFeedHealthy: { type: boolean, example: true }
         wsFeedStatus: { type: string, example: CONNECTED }
         tradeDate: { type: string, example: "2026-11-22" }

@@ -172,7 +172,7 @@ export class SqliteStateStore implements StateStorePort {
       stmt.run({
         token: position.token,
         trading_symbol: position.symbol,
-        exchange: 'NFO',
+        exchange: position.exchange,
         qty: position.quantity,
         product: 'I',
         entry_price_paise: position.entryPricePaise,
@@ -225,6 +225,7 @@ export class SqliteStateStore implements StateStorePort {
       return {
         token: row.token,
         symbol: row.trading_symbol,
+        exchange: row.exchange,
         side: 'BUY',
         quantity: row.qty,
         entryPricePaise: row.entry_price_paise,
@@ -253,6 +254,7 @@ export class SqliteStateStore implements StateStorePort {
       return rows.map((row) => ({
         token: row.token,
         symbol: row.trading_symbol,
+        exchange: row.exchange,
         side: 'BUY',
         quantity: row.qty,
         entryPricePaise: row.entry_price_paise,

@@ -256,13 +256,11 @@ export class HttpServer {
 
       const issues: string[] = [];
 
-      // Check if session token is set
-      if (this.broker && 'getSessionToken' in this.broker) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const token = (this.broker as any).getSessionToken?.();
-        if (!token) {
-          issues.push('No active broker session token (daily login required)');
-        }
+      const sessionState = await this.sessionService.getSessionState();
+      if (!sessionState.sessionValid) {
+        issues.push(sessionState.sessionValidity === 'UNKNOWN'
+          ? 'Broker session validity could not be confirmed'
+          : 'No valid broker session (daily login required)');
       }
 
       // Check feed status
@@ -308,10 +306,11 @@ export class HttpServer {
     this.app.get('/health', async () => {
       const openPositions = this.engine.getAllPositions().filter((p) => p.status === 'OPEN');
       const memoryUsage = process.memoryUsage();
+      const sessionState = await this.sessionService.getSessionState();
 
       // A stored token is session state, not proof of broker connectivity.
       const brokerConnected = this.config.brokerMode === 'live'
-        ? !!this.config.flattradeWsFeed?.isAuthenticatedConnection()
+        ? sessionState.sessionValid && !!this.config.flattradeWsFeed?.isAuthenticatedConnection()
         : false;
 
       // Determine actual feed health
@@ -327,9 +326,12 @@ export class HttpServer {
         brokerMode: this.config.brokerMode,
         tradingEnabled: this.config.tradingEnabled,
         brokerConnected,
+        sessionTokenPresent: sessionState.sessionTokenPresent,
+        sessionValid: sessionState.sessionValid,
+        sessionValidity: sessionState.sessionValidity,
         wsFeedStatus,
         wsFeedHealthy: this.config.brokerMode === 'live'
-          ? !!this.config.flattradeWsFeed?.isMarketDataReady()
+          ? sessionState.sessionValid && !!this.config.flattradeWsFeed?.isMarketDataReady()
           : false,
         accountStateUncertain: this.reconciler.isAccountStateUncertain,
         openPositionsCount: openPositions.length,
@@ -504,9 +506,8 @@ export class HttpServer {
 
     // Flattrade Authentication & Session Status Endpoint
     this.app.get('/api/auth/status', async () => {
-      const sessionValid = this.config.brokerMode === 'paper'
-        ? true
-        : !!(this.broker && 'getSessionToken' in this.broker && (this.broker as any).getSessionToken?.());
+      const sessionState = await this.sessionService.getSessionState();
+      const sessionValid = sessionState.sessionValid;
       const wsFeed = this.config.flattradeWsFeed;
       const wsFeedStatus = this.config.brokerMode === 'paper'
         ? 'PAPER_MODE'
@@ -515,15 +516,19 @@ export class HttpServer {
       const wsAuthenticated = this.config.brokerMode === 'paper' ? false : !!wsFeed?.isAuthenticatedConnection();
       const marketDataReady = this.config.brokerMode === 'paper'
         ? false
-        : wsTransportConnected && wsAuthenticated && !!wsFeed?.isMarketDataReady();
-      const brokerConnected = this.config.brokerMode === 'paper' ? false : wsAuthenticated;
+        : sessionValid && wsTransportConnected && wsAuthenticated && !!wsFeed?.isMarketDataReady();
+      const brokerConnected = this.config.brokerMode === 'paper' ? false : sessionValid && wsAuthenticated;
       const wsFeedHealthy = marketDataReady;
 
       let status = 'AUTHENTICATION_REQUIRED';
       if (this.sessionService.isAuthenticating()) {
         status = 'AUTHENTICATING';
-      } else if (!sessionValid) {
+      } else if (sessionState.sessionValidity === 'INVALID') {
         status = this.sessionService.getLastAuthError() ? 'AUTHENTICATION_FAILED' : 'AUTHENTICATION_REQUIRED';
+      } else if (sessionState.sessionValidity === 'UNKNOWN') {
+        status = 'SESSION_VALIDATION_UNAVAILABLE';
+      } else if (this.config.brokerMode === 'paper') {
+        status = 'PAPER_MODE';
       } else if (marketDataReady) {
         status = 'FEED_READY';
       } else if (wsAuthenticated) {
@@ -537,7 +542,9 @@ export class HttpServer {
       return {
         status,
         brokerConnected,
+        sessionTokenPresent: sessionState.sessionTokenPresent,
         sessionValid,
+        sessionValidity: sessionState.sessionValidity,
         wsTransportConnected,
         wsAuthenticated,
         marketDataReady,

@@ -16,6 +16,7 @@ function makeLadder(overrides?: Partial<LadderPosition>): LadderPosition {
   return {
     token: 'TOKEN1',
     symbol: 'NIFTY26NOV24500CE',
+    exchange: 'NFO',
     side: 'BUY',
     quantity: 50,
     entryPricePaise: 10000,

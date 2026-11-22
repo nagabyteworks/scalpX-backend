@@ -6,7 +6,7 @@ import { PaperBrokerAdapter } from '../../src/adapters/broker/PaperBrokerAdapter
 import { RatchetLadderEngine } from '../../src/domain/engines/RatchetLadderEngine.js';
 import { RiskGuard } from '../../src/domain/engines/RiskGuard.js';
 import { OrderManager } from '../../src/application/OrderManager.js';
-import { SessionService } from '../../src/application/SessionService.js';
+import { getTodayDateIST, SessionService } from '../../src/application/SessionService.js';
 import { ReconcilerService } from '../../src/application/ReconcilerService.js';
 import type { MarketFeedPort } from '../../src/domain/ports/MarketFeedPort.js';
 
@@ -316,7 +316,10 @@ describe('HttpServer Transport Layer Integration', () => {
       };
       (server as any).config.brokerMode = 'live';
       (server as any).config.flattradeWsFeed = mutableFeed;
+      (server as any).sessionService = new SessionService(broker as any, stateStore, 'API_KEY', { brokerMode: 'live' });
       broker.setSessionToken('stored-session');
+      await stateStore.saveDailySession(getTodayDateIST(), 'stored-session');
+      (broker as any).validateSession = async () => 'VALID';
       const status = async () => {
         const res = await fetch(`${baseUrl}/api/auth/status`, { headers: {
           'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}`,

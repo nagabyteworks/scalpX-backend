@@ -36,10 +36,10 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
     expect(wsAdapter.isTransportConnected()).toBe(true);
     expect(wsAdapter.isAuthenticatedConnection()).toBe(true);
     expect(wsAdapter.isMarketDataReady()).toBe(false);
-    await wsAdapter.subscribe(['26000']);
+    await wsAdapter.subscribe(['NFO|26000']);
 
     // Broadcast tick from mock server
-    mockServer.broadcastTick('26000', '110.05', '110.00', '110.10');
+    mockServer.broadcastTick('NFO', '26000', '110.05', '110.00', '110.10');
 
     // Wait briefly for tick dispatch
     await new Promise((r) => setTimeout(r, 100));
@@ -82,7 +82,7 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
     wsAdapter.onStatus((status) => statusEvents.push(status));
 
     await wsAdapter.connect();
-    await wsAdapter.subscribe(['26000']);
+    await wsAdapter.subscribe(['NFO|26000']);
 
     expect(statusEvents).toContain('CONNECTED');
 
@@ -100,5 +100,42 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
     // Reconnected successfully
     const connectedCount = statusEvents.filter((s) => s === 'CONNECTED').length;
     expect(connectedCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it('sends BFO and NFO exchange-qualified subscriptions and preserves them on reconnect', async () => {
+    wsAdapter = new FlattradeWsAdapter({
+      wsUrl,
+      userId: 'FT001',
+      sessionToken: 'WS_SESSION_TOKEN',
+      watchdogIntervalMs: 200,
+      staleTimeoutMs: 600,
+      marketHoursOverride: true,
+    });
+    await wsAdapter.subscribe(['BFO|901', 'NFO|902']);
+    await wsAdapter.connect();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(mockServer.subscriptionMessages).toContain('BFO|901#NFO|902');
+    expect(wsAdapter.isMarketDataReady()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    expect(mockServer.subscriptionMessages.filter((msg) => msg === 'BFO|901#NFO|902').length).toBeGreaterThanOrEqual(2);
+    expect(wsAdapter.isMarketDataReady()).toBe(true);
+  });
+
+  it('requires fresh ticks for every exchange-qualified subscription', async () => {
+    await mockServer.stop();
+    mockServer = new MockFlattradeServer({ sessionToken: 'WS_SESSION_TOKEN', acknowledgeSubscriptions: false });
+    wsUrl = (await mockServer.start()).wsUrl;
+    wsAdapter = new FlattradeWsAdapter({
+      wsUrl, userId: 'FT001', sessionToken: 'WS_SESSION_TOKEN', marketHoursOverride: false,
+    });
+    await wsAdapter.connect();
+    await expect(wsAdapter.subscribe(['901'])).rejects.toThrow('EXCHANGE|TOKEN');
+    await wsAdapter.subscribe(['BFO|901', 'NFO|902']);
+    mockServer.broadcastTick('BFO', '901', '110.00');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(wsAdapter.isMarketDataReady()).toBe(false);
+    mockServer.broadcastTick('NFO', '902', '110.00');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(wsAdapter.isMarketDataReady()).toBe(true);
   });
 });

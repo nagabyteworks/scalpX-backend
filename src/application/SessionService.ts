@@ -40,6 +40,14 @@ export interface SessionServiceOptions {
   cooldownMs?: number; // default: 15,000 (15 seconds)
 }
 
+export type SessionValidity = 'VALID' | 'INVALID' | 'UNKNOWN' | 'SIMULATED';
+
+export interface SessionState {
+  sessionTokenPresent: boolean;
+  sessionValid: boolean;
+  sessionValidity: SessionValidity;
+}
+
 export class SessionService {
   private readonly broker: FlattradeRestAdapter;
   private readonly stateStore: StateStorePort;
@@ -54,6 +62,7 @@ export class SessionService {
   private cooldownUntil = 0;
   private authenticating = false;
   private lastAuthError: string | null = null;
+  private sessionValidationCache: { token: string; checkedAt: number; validity: SessionValidity } | null = null;
 
   constructor(
     broker: FlattradeRestAdapter,
@@ -84,11 +93,48 @@ export class SessionService {
     if (this.brokerMode === 'paper') {
       return true;
     }
+    return !!this.sessionValidationCache &&
+      this.sessionValidationCache.validity === 'VALID' &&
+      Date.now() - this.sessionValidationCache.checkedAt < 15000 &&
+      this.sessionValidationCache.token === this.getSessionToken();
+  }
+
+  private getSessionToken(): string | null {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return typeof (this.broker as any).getSessionToken === 'function'
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ? !!(this.broker as any).getSessionToken()
-      : false;
+      ? (this.broker as any).getSessionToken()
+      : null;
+  }
+
+  async getSessionState(): Promise<SessionState> {
+    if (this.brokerMode === 'paper') {
+      return { sessionTokenPresent: !!this.getSessionToken(), sessionValid: true, sessionValidity: 'SIMULATED' };
+    }
+
+    const token = this.getSessionToken();
+    if (!token) return { sessionTokenPresent: false, sessionValid: false, sessionValidity: 'INVALID' };
+
+    const todayToken = await this.stateStore.getDailySession(getTodayDateIST());
+    if (!todayToken || todayToken !== token) {
+      return { sessionTokenPresent: true, sessionValid: false, sessionValidity: 'INVALID' };
+    }
+
+    const now = Date.now();
+    if (this.sessionValidationCache?.token === token && now - this.sessionValidationCache.checkedAt < 15000) {
+      const validity = this.sessionValidationCache.validity;
+      return { sessionTokenPresent: true, sessionValid: validity === 'VALID', sessionValidity: validity };
+    }
+
+    // Flattrade's documented, read-only /Limits request validates the jKey.
+    // A network/service failure is UNKNOWN; it must not be confused with an invalid token.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const validity: SessionValidity = typeof (this.broker as any).validateSession === 'function'
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ? await (this.broker as any).validateSession()
+      : 'UNKNOWN';
+    this.sessionValidationCache = { token, checkedAt: now, validity };
+    return { sessionTokenPresent: true, sessionValid: validity === 'VALID', sessionValidity: validity };
   }
 
   setAuthClient(authClient: FlattradeAuthClient): void {
@@ -137,6 +183,7 @@ export class SessionService {
     if (typeof this.broker.setSessionToken === 'function') {
       this.broker.setSessionToken(token);
     }
+    this.sessionValidationCache = { token, checkedAt: Date.now(), validity: 'VALID' };
 
     if (this.wsFeed) {
       this.wsFeed.updateSessionToken(token);
@@ -172,7 +219,8 @@ export class SessionService {
       if (typeof this.broker.setSessionToken === 'function') {
         this.broker.setSessionToken(token);
       }
-      return token;
+      const sessionState = await this.getSessionState();
+      return sessionState.sessionValid ? token : null;
     }
     return null;
   }
@@ -224,6 +272,7 @@ export class SessionService {
 
       // Update Rest Adapter token
       this.broker.setSessionToken(token);
+      this.sessionValidationCache = { token, checkedAt: Date.now(), validity: 'VALID' };
 
       // Connect / Update WS Feed
       if (this.wsFeed) {

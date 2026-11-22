@@ -55,6 +55,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   private isDestroyed = false;
 
   private readonly subscribedTokens = new Set<string>();
+  private readonly subscriptionStartedAt = new Map<string, number>();
   private tickCallback: ((tick: Tick) => void) | null = null;
   private readonly statusListeners: FeedStatusListener[] = [];
   private readonly orderUpdateListeners: OrderUpdateListener[] = [];
@@ -112,6 +113,14 @@ export class FlattradeWsAdapter implements MarketFeedPort {
         // Safe dispatch
       }
     }
+  }
+
+  private normalizeInstrumentIds(instrumentIds: string[]): string[] {
+    return instrumentIds.map((instrumentId) => {
+      const match = /^([A-Za-z0-9]+)\|([^|#]+)$/.exec(instrumentId);
+      if (!match) throw new Error(`Market subscriptions require EXCHANGE|TOKEN identifiers: ${instrumentId}`);
+      return `${match[1]!.toUpperCase()}|${match[2]!}`;
+    });
   }
 
   async connect(): Promise<void> {
@@ -199,10 +208,12 @@ export class FlattradeWsAdapter implements MarketFeedPort {
 
       // 2. Touchline ticks
       if (msg.t === 'tk' || msg.t === 'tf') {
-        if (msg.tk && msg.lp) {
+        if (msg.e && msg.tk && msg.lp) {
+          const instrumentId = `${String(msg.e).toUpperCase()}|${String(msg.tk)}`;
+          if (!this.subscribedTokens.has(instrumentId)) return;
           const receivedAt = Date.now();
           this.lastTickTimestamp = receivedAt;
-          this.lastTickByToken.set(String(msg.tk), receivedAt);
+          this.lastTickByToken.set(instrumentId, receivedAt);
           const ltpPaise = toPaise(msg.lp);
           const tick: Tick = {
             token: String(msg.tk),
@@ -237,22 +248,30 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   }
 
   async subscribe(tokens: string[]): Promise<void> {
-    for (const tok of tokens) {
-      this.subscribedTokens.add(tok);
+    const instrumentIds = this.normalizeInstrumentIds(tokens);
+    const now = Date.now();
+    for (const id of instrumentIds) {
+      this.subscribedTokens.add(id);
+      this.subscriptionStartedAt.set(id, now);
     }
 
     if (this.isAuthenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      const keyStr = tokens.map((tok) => (tok.includes('|') ? tok : `NFO|${tok}`)).join('#');
+      for (const id of instrumentIds) this.lastTickByToken.delete(id);
+      this.lastTickTimestamp = 0;
+      const keyStr = instrumentIds.join('#');
       this.send({ t: 't', k: keyStr });
     }
   }
 
   async unsubscribe(tokens: string[]): Promise<void> {
-    for (const tok of tokens) {
-      this.subscribedTokens.delete(tok);
+    const instrumentIds = this.normalizeInstrumentIds(tokens);
+    for (const id of instrumentIds) {
+      this.subscribedTokens.delete(id);
+      this.lastTickByToken.delete(id);
+      this.subscriptionStartedAt.delete(id);
     }
     if (this.isAuthenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      const keyStr = tokens.map((tok) => (tok.includes('|') ? tok : `NFO|${tok}`)).join('#');
+      const keyStr = instrumentIds.join('#');
       this.send({ t: 'u', k: keyStr });
     }
   }
@@ -260,7 +279,11 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   private resubscribeAll(): void {
     if (this.subscribedTokens.size > 0) {
       const tokens = Array.from(this.subscribedTokens);
-      const keyStr = tokens.map((tok) => (tok.includes('|') ? tok : `NFO|${tok}`)).join('#');
+      for (const id of tokens) this.lastTickByToken.delete(id);
+      const now = Date.now();
+      for (const id of tokens) this.subscriptionStartedAt.set(id, now);
+      this.lastTickTimestamp = 0;
+      const keyStr = tokens.join('#');
       this.send({ t: 't', k: keyStr });
     }
   }
@@ -290,8 +313,12 @@ export class FlattradeWsAdapter implements MarketFeedPort {
         return;
       }
 
-      const elapsed = Date.now() - this.lastTickTimestamp;
-      if (elapsed >= staleTimeout) {
+      const now = Date.now();
+      const staleSubscriptionExists = [...this.subscribedTokens].some((id) => {
+        const lastTick = this.lastTickByToken.get(id) ?? this.subscriptionStartedAt.get(id) ?? this.lastTickTimestamp;
+        return now - lastTick >= staleTimeout;
+      });
+      if (staleSubscriptionExists) {
         this.emitStatus('FEED_STALE');
         this.forceTerminateAndReconnect();
       }
@@ -341,9 +368,8 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   isMarketDataReady(maxAgeMs = this.config.staleTimeoutMs ?? 3000): boolean {
     if (!this.isAuthenticated || !this.ws || this.ws.readyState !== WebSocket.OPEN || this.subscribedTokens.size === 0) return false;
     const now = Date.now();
-    return [...this.subscribedTokens].every((token) => {
-      const bareToken = token.includes('|') ? token.split('|').at(-1)! : token;
-      const receivedAt = this.lastTickByToken.get(bareToken);
+    return [...this.subscribedTokens].every((instrumentId) => {
+      const receivedAt = this.lastTickByToken.get(instrumentId);
       return receivedAt !== undefined && now - receivedAt <= maxAgeMs;
     });
   }
@@ -373,5 +399,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     }
     this.ws = null;
     this.subscribedTokens.clear();
+    this.subscriptionStartedAt.clear();
+    this.lastTickByToken.clear();
   }
 }

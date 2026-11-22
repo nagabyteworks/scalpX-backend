@@ -18,6 +18,7 @@ describe('RatchetLadderEngine Unit Tests', () => {
   const createPosition = (overrides?: Partial<LadderPosition>): LadderPosition => ({
     token: '26000',
     symbol: 'NIFTY26NOV24500CE',
+    exchange: 'NFO',
     side: 'BUY',
     quantity: 50,
     entryPricePaise: 10000, // 100.00

@@ -155,7 +155,7 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
 ### 4.3 Check Authentication & Readiness Status
 - **Method & Path:** `GET /api/auth/status`
 - **Auth:** Required (`Authorization: Bearer <JWT>`, `X-Device-Id: <UUID>`)
-- **Description:** Separately reports `sessionValid`, WebSocket transport (`wsTransportConnected`), broker WebSocket authentication (`wsAuthenticated`), and fresh ticks for every subscribed instrument (`marketDataReady`). A stored session token alone never proves broker connectivity. `FEED_READY` requires fresh ticks for every active subscription.
+- **Description:** Separately reports `sessionTokenPresent`, session validation (`sessionValid`/`sessionValidity`), WebSocket transport (`wsTransportConnected`), broker WebSocket authentication (`wsAuthenticated`), and fresh ticks for every subscribed instrument (`marketDataReady`). LIVE session validity is checked against today's persisted token and Flattrade's documented read-only `/Limits` API; transient validation failures are `UNKNOWN`, not invalid. A stored session token alone never proves broker connectivity. `FEED_READY` requires fresh ticks for every active subscription.
 - **Response `200 OK`:**
 ```json
 {
@@ -179,6 +179,8 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
   - `WEBSOCKET_CONNECTING`: Broker WebSocket connection in progress.
   - `FEED_READY`: Authenticated socket and recent ticks for every active subscription.
   - `WEBSOCKET_DISCONNECTED`: Valid session exists but the broker socket is disconnected.
+  - `SESSION_VALIDATION_UNAVAILABLE`: The documented session probe could not confirm validity; no login is inferred from this transient failure.
+  - `PAPER_MODE`: Simulated broker mode; no live broker or market-data readiness is claimed.
   - `AUTHENTICATION_FAILED`: Authentication attempt failed.
 
 ---

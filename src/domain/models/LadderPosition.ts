@@ -4,6 +4,7 @@ export type LadderPositionStatus = 'OPEN' | 'CLOSED' | 'MANUAL_INTERVENTION';
 export interface LadderPosition {
   token: string;
   symbol: string;
+  exchange: string;
   side: PositionSide;
   quantity: number;
   entryPricePaise: number;
