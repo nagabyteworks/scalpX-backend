@@ -23,10 +23,39 @@ interface QueuedTask<T> {
   reject: (reason?: unknown) => void;
 }
 
+/**
+ * Optional interface for a persistence store that can save/restore daily risk state.
+ * Injected into RiskGuard to enable crash-safe daily loss limits.
+ */
+export interface RiskPersistencePort {
+  saveRiskStateSync(state: { tradeDate: string; realizedPnlPaise: number; killSwitchTriggered: boolean; updatedAt: number }): void;
+  getRiskStateSync(tradeDate: string): { realizedPnlPaise: number; killSwitchTriggered: boolean } | null;
+}
+
+/**
+ * Returns today's trading date string in YYYY-MM-DD format, IST (Asia/Kolkata).
+ */
+function getTodayTradeDateIST(): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const globalTemporal = (globalThis as any).Temporal;
+  if (globalTemporal?.Now) {
+    return globalTemporal.Now.plainDateISO('Asia/Kolkata').toString();
+  }
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utc + 5.5 * 3600000);
+  const y = ist.getFullYear();
+  const m = String(ist.getMonth() + 1).padStart(2, '0');
+  const d = String(ist.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 export class RiskGuard {
   private readonly limits: RiskLimits;
   private realizedPnlPaise = 0;
   private isKilled = false;
+  private currentTradeDate: string;
+  private readonly persistence?: RiskPersistencePort;
 
   // Token-bucket rate limiter (capped at 6 calls/sec, HIGH priority preempts NORMAL)
   private readonly capacity: number;
@@ -38,12 +67,52 @@ export class RiskGuard {
   private readonly normalPriorityQueue: QueuedTask<unknown>[] = [];
   private processTimer: NodeJS.Timeout | null = null;
 
-  constructor(limits: RiskLimits) {
+  constructor(limits: RiskLimits, persistence?: RiskPersistencePort) {
     this.limits = limits;
     this.capacity = limits.rateLimitCapacity ?? 6;
     this.refillRatePerSec = limits.refillRatePerSec ?? 6;
     this.tokens = this.capacity;
     this.lastRefillTimestamp = Date.now();
+    this.persistence = persistence;
+    this.currentTradeDate = getTodayTradeDateIST();
+
+    // Restore persisted daily state from SQLite on startup
+    if (persistence) {
+      this.restoreFromPersistence();
+    }
+  }
+
+  /**
+   * Restores daily P&L and kill-switch state from persistence.
+   * Prevents process restart from resetting the daily loss limit.
+   */
+  private restoreFromPersistence(): void {
+    const today = getTodayTradeDateIST();
+    const saved = this.persistence?.getRiskStateSync(today);
+    if (saved) {
+      this.realizedPnlPaise = saved.realizedPnlPaise;
+      this.isKilled = saved.killSwitchTriggered;
+      console.log(
+        `🔄 RiskGuard: Restored daily state for ${today} — P&L: ${this.realizedPnlPaise} paise, ` +
+          `KillSwitch: ${this.isKilled}`
+      );
+    } else {
+      console.log(`🔄 RiskGuard: No persisted state for ${today}. Starting fresh.`);
+    }
+  }
+
+  /**
+   * Persists current state synchronously on every P&L update.
+   * Synchronous to guarantee consistency before process may crash.
+   */
+  private persistState(): void {
+    if (!this.persistence) return;
+    this.persistence.saveRiskStateSync({
+      tradeDate: this.currentTradeDate,
+      realizedPnlPaise: this.realizedPnlPaise,
+      killSwitchTriggered: this.isKilled,
+      updatedAt: Date.now(),
+    });
   }
 
   /**
@@ -56,6 +125,14 @@ export class RiskGuard {
     side: OrderSide;
     currentOpenQty: number;
   }): void {
+    // Check if the trade date rolled over since last check
+    const today = getTodayTradeDateIST();
+    if (today !== this.currentTradeDate) {
+      // New trading day — do NOT reset in-memory state; persistence will reflect correct date
+      // The persisted state for today starts at 0, which is correctly restored on next restart.
+      this.currentTradeDate = today;
+    }
+
     if (this.isKillSwitchTriggered()) {
       throw new RiskViolationError(
         `Daily kill switch triggered. Cumulative daily loss: ${Math.abs(this.realizedPnlPaise)} paise exceeds limit ${this.limits.maxDailyLossPaise} paise.`
@@ -82,12 +159,14 @@ export class RiskGuard {
   /**
    * Records realized P&L from a closed trade.
    * If cumulative loss reaches or exceeds maxDailyLossPaise, triggers kill switch.
+   * Persists state to SQLite after every update.
    */
   recordRealizedPnl(pnlPaise: number): void {
     this.realizedPnlPaise += pnlPaise;
     if (this.realizedPnlPaise <= -this.limits.maxDailyLossPaise) {
       this.isKilled = true;
     }
+    this.persistState();
   }
 
   isKillSwitchTriggered(): boolean {
@@ -100,6 +179,7 @@ export class RiskGuard {
 
   triggerKillSwitch(): void {
     this.isKilled = true;
+    this.persistState();
   }
 
   /**

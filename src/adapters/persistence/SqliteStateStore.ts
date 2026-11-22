@@ -5,14 +5,22 @@ import type {
   ClosedTradeRecord,
 } from '../../domain/ports/StateStorePort.js';
 import type { LadderPosition, LadderPositionStatus } from '../../domain/models/LadderPosition.js';
+import { TokenEncryption } from './TokenEncryption.js';
+import { RiskStateStore, type DailyRiskState } from './RiskStateStore.js';
 
 export class SqliteStateStore implements StateStorePort {
   private readonly db: Database.Database;
   private readonly queue: Array<() => void> = [];
   private isProcessing = false;
+  private readonly tokenEncryption?: TokenEncryption;
+  public readonly riskState: RiskStateStore;
 
-  constructor(dbPath = ':memory:') {
+  constructor(dbPath = ':memory:', encryptionKeyHex?: string) {
     this.db = new Database(dbPath);
+    if (encryptionKeyHex) {
+      this.tokenEncryption = new TokenEncryption(encryptionKeyHex);
+    }
+    this.riskState = new RiskStateStore(this.db);
     this.initDatabase();
   }
 
@@ -75,6 +83,16 @@ export class SqliteStateStore implements StateStorePort {
         exit_paise INTEGER NOT NULL,
         realized_pnl_paise INTEGER NOT NULL,
         closed_at INTEGER NOT NULL
+      );
+    `);
+
+    // 5. daily_risk_state table (managed by RiskStateStore but also initialized here for safety)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS daily_risk_state (
+        trade_date TEXT PRIMARY KEY,
+        realized_pnl_paise INTEGER NOT NULL DEFAULT 0,
+        kill_switch_triggered INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
       );
     `);
   }
@@ -244,7 +262,14 @@ export class SqliteStateStore implements StateStorePort {
     });
   }
 
-  async saveDailySession(tradeDate: string, tokenEncryptedOrLocal: string): Promise<void> {
+  /**
+   * Saves the daily session token to SQLite.
+   * In LIVE mode (encryptionKeyHex provided), the token is encrypted with AES-256-GCM.
+   * In PAPER mode, stored as-is.
+   * Never logs the plaintext token.
+   */
+  async saveDailySession(tradeDate: string, plainToken: string): Promise<void> {
+    const stored = this.tokenEncryption ? this.tokenEncryption.encrypt(plainToken) : plainToken;
     return this.enqueue(() => {
       const stmt = this.db.prepare(`
         INSERT INTO daily_sessions (trade_date, token_encrypted_or_local, created_at)
@@ -253,16 +278,42 @@ export class SqliteStateStore implements StateStorePort {
           token_encrypted_or_local = excluded.token_encrypted_or_local,
           created_at = excluded.created_at
       `);
-      stmt.run(tradeDate, tokenEncryptedOrLocal, Date.now());
+      stmt.run(tradeDate, stored, Date.now());
     });
   }
 
+  /**
+   * Retrieves and decrypts the daily session token.
+   * Returns null if no token exists, or if decryption fails (corrupted / wrong key).
+   * Never logs the plaintext token.
+   */
   async getDailySession(tradeDate: string): Promise<string | null> {
     return this.enqueue(() => {
       const stmt = this.db.prepare(`SELECT token_encrypted_or_local FROM daily_sessions WHERE trade_date = ?`);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const row = stmt.get(tradeDate) as any;
-      return row ? row.token_encrypted_or_local : null;
+      if (!row) return null;
+      const stored: string = row.token_encrypted_or_local;
+
+      if (!this.tokenEncryption) {
+        // Paper mode — plaintext
+        return stored;
+      }
+
+      // Live mode: attempt decryption
+      if (!TokenEncryption.isEncrypted(stored)) {
+        // Legacy plaintext token found — refuse to use it, force re-authentication
+        console.warn('⚠️  Legacy plaintext session token detected in SQLite. Re-authentication required.');
+        return null;
+      }
+
+      const decrypted = this.tokenEncryption.decrypt(stored);
+      if (!decrypted) {
+        console.warn('⚠️  Session token decryption failed (corrupted or wrong key). Re-authentication required.');
+        return null;
+      }
+
+      return decrypted;
     });
   }
 
@@ -283,6 +334,17 @@ export class SqliteStateStore implements StateStorePort {
         trade.closedAt
       );
     });
+  }
+
+  /**
+   * Saves daily risk state synchronously (called from RiskGuard on every P&L update).
+   */
+  saveRiskStateSync(state: DailyRiskState): void {
+    this.riskState.saveRiskState(state);
+  }
+
+  getRiskStateSync(tradeDate: string): DailyRiskState | null {
+    return this.riskState.getRiskState(tradeDate);
   }
 
   close(): void {

@@ -299,6 +299,17 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     }, delay);
   }
 
+  /**
+   * Returns the current connection state for health reporting.
+   * Never exposes the session token.
+   */
+  getConnectionState(): 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'DESTROYED' {
+    if (this.isDestroyed) return 'DESTROYED';
+    if (this.isAuthenticated && this.ws?.readyState === WebSocket.OPEN) return 'CONNECTED';
+    if (this.reconnectTimer) return 'RECONNECTING';
+    return 'DISCONNECTED';
+  }
+
   destroy(): void {
     this.isDestroyed = true;
     if (this.watchdogTimer) {
