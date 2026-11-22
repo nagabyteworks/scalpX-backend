@@ -25,6 +25,7 @@ describe('HttpServer Transport Layer Integration', () => {
   beforeEach(async () => {
     stateStore = new SqliteStateStore(':memory:');
     broker = new PaperBrokerAdapter();
+    broker.processTick({ token: '26000', ltpPaise: 11005, timestamp: Date.now() });
     engine = new RatchetLadderEngine(broker, stateStore);
 
     const riskGuard = new RiskGuard({
@@ -281,7 +282,7 @@ describe('HttpServer Transport Layer Integration', () => {
   });
 
   describe('Auth Status & Option Chain Endpoints', () => {
-    it('GET /api/auth/status returns current broker session and readiness', async () => {
+    it('GET /api/auth/status labels paper simulation and never claims a live feed', async () => {
       const res = await fetch(`${baseUrl}/api/auth/status`, {
         headers: {
           'X-Device-Id': 'DEVICE_123',
@@ -294,12 +295,52 @@ describe('HttpServer Transport Layer Integration', () => {
       const data = (await res.json()) as any;
       expect(data.status).toBeDefined();
       expect(data.brokerMode).toBe('paper');
-      expect(data.brokerConnected).toBe(true);
-      expect(data.wsFeedHealthy).toBe(true);
+      expect(data.brokerConnected).toBe(false);
+      expect(data.sessionValid).toBe(true);
+      expect(data.marketDataReady).toBe(false);
+      expect(data.wsFeedHealthy).toBe(false);
+      expect(data.status).not.toBe('FEED_READY');
       expect(data.tradingEnabled).toBe(true);
     });
 
-    it('GET /api/option-chain?symbol=SENSEX returns BFO strikes and valid option chain', async () => {
+    it('GET /api/auth/status distinguishes live session, socket auth, and fresh feed transitions', async () => {
+      const mutableFeed = {
+        state: 'DISCONNECTED',
+        transport: false,
+        authenticated: false,
+        ready: false,
+        getConnectionState() { return this.state; },
+        isTransportConnected() { return this.transport; },
+        isAuthenticatedConnection() { return this.authenticated; },
+        isMarketDataReady() { return this.ready; },
+      };
+      (server as any).config.brokerMode = 'live';
+      (server as any).config.flattradeWsFeed = mutableFeed;
+      broker.setSessionToken('stored-session');
+      const status = async () => {
+        const res = await fetch(`${baseUrl}/api/auth/status`, { headers: {
+          'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}`,
+        } });
+        return res.json() as Promise<any>;
+      };
+
+      expect((await status()).status).toBe('WEBSOCKET_DISCONNECTED');
+      mutableFeed.state = 'RECONNECTING';
+      expect((await status()).status).toBe('WEBSOCKET_CONNECTING');
+      mutableFeed.state = 'CONNECTED';
+      mutableFeed.transport = true;
+      mutableFeed.authenticated = true;
+      expect((await status()).status).toBe('AUTHENTICATED');
+      mutableFeed.ready = true;
+      const ready = await status();
+      expect(ready.status).toBe('FEED_READY');
+      expect(ready.marketDataReady).toBe(true);
+      mutableFeed.transport = false;
+      mutableFeed.authenticated = false;
+      expect((await status()).status).toBe('WEBSOCKET_DISCONNECTED');
+    });
+
+    it('GET /api/option-chain?symbol=SENSEX does not invent paper contracts', async () => {
       const res = await fetch(`${baseUrl}/api/option-chain?symbol=SENSEX&strikes=5`, {
         headers: {
           'X-Device-Id': 'DEVICE_123',
@@ -311,15 +352,19 @@ describe('HttpServer Transport Layer Integration', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const data = (await res.json()) as any;
       expect(data.symbol).toBe('SENSEX');
-      expect(data.expiry).toBeDefined();
+      expect(data.expiry).toBe('');
+      expect(data.simulated).toBe(true);
       expect(Array.isArray(data.strikes)).toBe(true);
-      expect(data.strikes.length).toBeGreaterThan(0);
+      expect(data.strikes).toHaveLength(0);
+    });
 
-      // Verify BFO token naming and strikes around 80000
-      const atmStrike = data.strikes.find((s: any) => s.strikePrice === 80000);
-      expect(atmStrike).toBeDefined();
-      expect(atmStrike.ceToken).toContain('BFO_SENSEX_80000_CE');
-      expect(atmStrike.peToken).toContain('BFO_SENSEX_80000_PE');
+    it('LIVE SENSEX chain fails closed without authoritative instrument and fresh spot data', async () => {
+      (server as any).config.brokerMode = 'live';
+      const res = await fetch(`${baseUrl}/api/option-chain?symbol=SENSEX&strikes=5`, {
+        headers: { 'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}` },
+      });
+      expect(res.status).toBe(503);
+      expect((await res.json() as any).error).toContain('instrument master');
     });
   });
 });

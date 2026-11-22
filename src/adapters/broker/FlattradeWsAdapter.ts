@@ -61,9 +61,11 @@ export class FlattradeWsAdapter implements MarketFeedPort {
 
   // Stale-Feed Watchdog state
   private lastTickTimestamp = 0;
+  private readonly lastTickByToken = new Map<string, number>();
   private watchdogTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private connectionReject: ((error: Error) => void) | null = null;
 
   constructor(config: FlattradeWsConfig) {
     this.config = config;
@@ -116,6 +118,12 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     if (this.isDestroyed) return;
 
     return new Promise<void>((resolve, reject) => {
+      this.connectionReject = reject;
+      const timeout = setTimeout(() => {
+        this.connectionReject = null;
+        reject(new Error('Timed out waiting for Flattrade WebSocket authentication acknowledgement'));
+        this.ws?.terminate();
+      }, 10000);
       try {
         this.ws = new WebSocket(this.wsUrl);
 
@@ -127,18 +135,27 @@ export class FlattradeWsAdapter implements MarketFeedPort {
         this.ws.on('message', (data: WebSocket.RawData) => {
           this.handleMessage(data);
           if (this.isAuthenticated) {
+            clearTimeout(timeout);
+            this.connectionReject = null;
             resolve();
           }
         });
 
         this.ws.on('close', () => {
           this.isAuthenticated = false;
+          this.lastTickTimestamp = 0;
+          this.lastTickByToken.clear();
+          clearTimeout(timeout);
+          this.connectionReject?.(new Error('Flattrade WebSocket disconnected before authentication completed'));
+          this.connectionReject = null;
           this.emitStatus('DISCONNECTED');
           this.scheduleReconnect();
         });
 
         this.ws.on('error', (err) => {
           if (!this.isAuthenticated) {
+            clearTimeout(timeout);
+            this.connectionReject = null;
             reject(err);
           }
         });
@@ -166,16 +183,26 @@ export class FlattradeWsAdapter implements MarketFeedPort {
       // 1. Connection acknowledgement
       if (msg.t === 'ck' && msg.s === 'OK') {
         this.isAuthenticated = true;
-        this.lastTickTimestamp = Date.now();
+        this.lastTickTimestamp = 0;
         this.emitStatus('CONNECTED');
         this.resubscribeAll();
         return;
       }
 
+      if (msg.t === 'ck' && msg.s !== 'OK') {
+        this.isAuthenticated = false;
+        this.connectionReject?.(new Error('Flattrade rejected WebSocket authentication'));
+        this.connectionReject = null;
+        this.ws?.close(4001, 'Broker WebSocket authentication rejected');
+        return;
+      }
+
       // 2. Touchline ticks
       if (msg.t === 'tk' || msg.t === 'tf') {
-        this.lastTickTimestamp = Date.now();
         if (msg.tk && msg.lp) {
+          const receivedAt = Date.now();
+          this.lastTickTimestamp = receivedAt;
+          this.lastTickByToken.set(String(msg.tk), receivedAt);
           const ltpPaise = toPaise(msg.lp);
           const tick: Tick = {
             token: String(msg.tk),
@@ -309,6 +336,24 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     if (this.isAuthenticated && this.ws?.readyState === WebSocket.OPEN) return 'CONNECTED';
     if (this.reconnectTimer) return 'RECONNECTING';
     return 'DISCONNECTED';
+  }
+
+  isMarketDataReady(maxAgeMs = this.config.staleTimeoutMs ?? 3000): boolean {
+    if (!this.isAuthenticated || !this.ws || this.ws.readyState !== WebSocket.OPEN || this.subscribedTokens.size === 0) return false;
+    const now = Date.now();
+    return [...this.subscribedTokens].every((token) => {
+      const bareToken = token.includes('|') ? token.split('|').at(-1)! : token;
+      const receivedAt = this.lastTickByToken.get(bareToken);
+      return receivedAt !== undefined && now - receivedAt <= maxAgeMs;
+    });
+  }
+
+  isTransportConnected(): boolean {
+    return !this.isDestroyed && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  isAuthenticatedConnection(): boolean {
+    return this.isTransportConnected() && this.isAuthenticated;
   }
 
   destroy(): void {

@@ -33,6 +33,9 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
     wsAdapter.onTick((tick) => receivedTicks.push(tick));
 
     await wsAdapter.connect();
+    expect(wsAdapter.isTransportConnected()).toBe(true);
+    expect(wsAdapter.isAuthenticatedConnection()).toBe(true);
+    expect(wsAdapter.isMarketDataReady()).toBe(false);
     await wsAdapter.subscribe(['26000']);
 
     // Broadcast tick from mock server
@@ -47,6 +50,21 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
     expect(tick.ltpPaise).toBe(11005); // 110.05 -> 11005 integer paise
     expect(tick.bestBidPaise).toBe(11000);
     expect(tick.bestAskPaise).toBe(11010);
+    expect(wsAdapter.isMarketDataReady()).toBe(true);
+  });
+
+  it('rejects broker WebSocket authentication failure instead of remaining pending', async () => {
+    wsAdapter = new FlattradeWsAdapter({
+      wsUrl,
+      userId: 'FT001',
+      sessionToken: 'WRONG_SESSION_TOKEN',
+      watchdogIntervalMs: 500,
+      staleTimeoutMs: 1500,
+      marketHoursOverride: false,
+    });
+    await expect(wsAdapter.connect()).rejects.toThrow('rejected WebSocket authentication');
+    expect(wsAdapter.isAuthenticatedConnection()).toBe(false);
+    expect(wsAdapter.isMarketDataReady()).toBe(false);
   });
 
   it('triggers FEED_STALE after 3000ms silence in market hours, terminates, and reconnects', async () => {
@@ -74,6 +92,7 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
 
     expect(statusEvents).toContain('FEED_STALE');
     expect(statusEvents).toContain('RECONNECTING');
+    expect(wsAdapter.isMarketDataReady()).toBe(false);
 
     // Wait for backoff reconnect (500ms backoff)
     await new Promise((r) => setTimeout(r, 1200));

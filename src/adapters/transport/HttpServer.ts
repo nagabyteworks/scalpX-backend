@@ -266,10 +266,14 @@ export class HttpServer {
       }
 
       // Check feed status
-      if (this.config.flattradeWsFeed) {
+      if (!this.config.flattradeWsFeed) {
+        issues.push('Market WebSocket feed is not configured');
+      } else {
         const feedState = this.config.flattradeWsFeed.getConnectionState();
         if (feedState !== 'CONNECTED') {
           issues.push(`Market WebSocket feed is ${feedState}`);
+        } else if (!this.config.flattradeWsFeed.isMarketDataReady()) {
+          issues.push('Market WebSocket subscriptions have not produced fresh ticks');
         }
       }
 
@@ -305,14 +309,10 @@ export class HttpServer {
       const openPositions = this.engine.getAllPositions().filter((p) => p.status === 'OPEN');
       const memoryUsage = process.memoryUsage();
 
-      // Determine actual broker connectivity
-      let brokerConnected = false;
-      if (this.config.brokerMode === 'paper') {
-        brokerConnected = true;
-      } else if (this.broker && 'getSessionToken' in this.broker) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        brokerConnected = !!(this.broker as any).getSessionToken?.();
-      }
+      // A stored token is session state, not proof of broker connectivity.
+      const brokerConnected = this.config.brokerMode === 'live'
+        ? !!this.config.flattradeWsFeed?.isAuthenticatedConnection()
+        : false;
 
       // Determine actual feed health
       let wsFeedStatus: string = 'NOT_APPLICABLE';
@@ -328,7 +328,9 @@ export class HttpServer {
         tradingEnabled: this.config.tradingEnabled,
         brokerConnected,
         wsFeedStatus,
-        wsFeedHealthy: wsFeedStatus === 'CONNECTED' || wsFeedStatus === 'PAPER_MODE',
+        wsFeedHealthy: this.config.brokerMode === 'live'
+          ? !!this.config.flattradeWsFeed?.isMarketDataReady()
+          : false,
         accountStateUncertain: this.reconciler.isAccountStateUncertain,
         openPositionsCount: openPositions.length,
         memoryRssMb: Math.round(memoryUsage.rss / (1024 * 1024)),
@@ -473,14 +475,14 @@ export class HttpServer {
 
         if (err instanceof InvalidOtpError) {
           reply.code(401).send({
-            error: 'Flattrade authentication failed. Check the current OTP and try again.',
+            error: 'Invalid OTP or authentication failed. Check the current OTP and try again.',
           });
           return;
         }
 
         if (err instanceof FallbackRequiredError) {
           reply.code(502).send({
-            error: 'Flattrade requires browser authentication for this attempt.',
+            error: 'Browser fallback required: Flattrade requires browser authentication for this attempt.',
             fallbackRequired: true,
           });
           return;
@@ -502,42 +504,46 @@ export class HttpServer {
 
     // Flattrade Authentication & Session Status Endpoint
     this.app.get('/api/auth/status', async () => {
-      let brokerConnected = false;
-      if (this.config.brokerMode === 'paper') {
-        brokerConnected = true;
-      } else if (this.broker && 'getSessionToken' in this.broker) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        brokerConnected = !!(this.broker as any).getSessionToken?.();
-      }
-
-      let wsFeedStatus = 'NOT_APPLICABLE';
-      if (this.config.brokerMode === 'live' && this.config.flattradeWsFeed) {
-        wsFeedStatus = this.config.flattradeWsFeed.getConnectionState();
-      } else if (this.config.brokerMode === 'paper') {
-        wsFeedStatus = 'CONNECTED';
-      }
-
-      const wsFeedHealthy = wsFeedStatus === 'CONNECTED' || wsFeedStatus === 'PAPER_MODE';
+      const sessionValid = this.config.brokerMode === 'paper'
+        ? true
+        : !!(this.broker && 'getSessionToken' in this.broker && (this.broker as any).getSessionToken?.());
+      const wsFeed = this.config.flattradeWsFeed;
+      const wsFeedStatus = this.config.brokerMode === 'paper'
+        ? 'PAPER_MODE'
+        : wsFeed?.getConnectionState() ?? 'DISCONNECTED';
+      const wsTransportConnected = this.config.brokerMode === 'paper' ? false : !!wsFeed?.isTransportConnected();
+      const wsAuthenticated = this.config.brokerMode === 'paper' ? false : !!wsFeed?.isAuthenticatedConnection();
+      const marketDataReady = this.config.brokerMode === 'paper'
+        ? false
+        : wsTransportConnected && wsAuthenticated && !!wsFeed?.isMarketDataReady();
+      const brokerConnected = this.config.brokerMode === 'paper' ? false : wsAuthenticated;
+      const wsFeedHealthy = marketDataReady;
 
       let status = 'AUTHENTICATION_REQUIRED';
       if (this.sessionService.isAuthenticating()) {
         status = 'AUTHENTICATING';
-      } else if (!brokerConnected) {
+      } else if (!sessionValid) {
         status = this.sessionService.getLastAuthError() ? 'AUTHENTICATION_FAILED' : 'AUTHENTICATION_REQUIRED';
-      } else if (wsFeedHealthy) {
-        // Socket authentication is not proof that a market-data subscription has produced data.
+      } else if (marketDataReady) {
+        status = 'FEED_READY';
+      } else if (wsAuthenticated) {
         status = 'AUTHENTICATED';
-      } else if (wsFeedStatus === 'CONNECTING') {
+      } else if (wsFeedStatus === 'RECONNECTING') {
         status = 'WEBSOCKET_CONNECTING';
       } else {
-        status = 'AUTHENTICATED';
+        status = 'WEBSOCKET_DISCONNECTED';
       }
 
       return {
         status,
         brokerConnected,
+        sessionValid,
+        wsTransportConnected,
+        wsAuthenticated,
+        marketDataReady,
         wsFeedHealthy,
         wsFeedStatus,
+        accountStateUncertain: this.reconciler.isAccountStateUncertain,
         tradeDate: getTodayDateIST(),
         brokerMode: this.config.brokerMode,
         tradingEnabled: this.config.tradingEnabled,
@@ -555,47 +561,29 @@ export class HttpServer {
       const symbol = parsed.data.symbol.toUpperCase();
       const exch = parsed.data.exchange ?? (symbol === 'SENSEX' || symbol === 'BANKEX' ? 'BFO' : 'NFO');
 
+      // Flattrade GetOptionChain requires a tradable option/future symbol and a
+      // nonzero underlying midpoint. This service has no instrument-master
+      // lookup for the index token, so calling it with bare "SENSEX" and "0"
+      // would be an unsupported request and could not establish a fresh ATM.
+      if (this.config.brokerMode === 'live') {
+        reply.code(503).send({ error: 'Live option chain is unavailable until a validated instrument master and fresh underlying quote are configured.' });
+        return;
+      }
+
       if (this.broker.getOptionChain) {
         const rawChain = await this.broker.getOptionChain(exch, symbol, '0', parsed.data.strikes);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const chain = rawChain as any;
         if (chain && Array.isArray(chain.strikes)) {
-          return chain;
-        }
-
-        // Normalize raw Flattrade values if present
-        if (chain && Array.isArray(chain.values)) {
-          const strikesMap = new Map<number, { strikePrice: number; ceToken?: string; ceSymbol?: string; ceLtpPaise?: number; peToken?: string; peSymbol?: string; peLtpPaise?: number }>();
-          for (const item of chain.values) {
-            const sp = parseFloat(item.strprc);
-            if (isNaN(sp)) continue;
-            let strikeObj = strikesMap.get(sp);
-            if (!strikeObj) {
-              strikeObj = { strikePrice: sp };
-              strikesMap.set(sp, strikeObj);
-            }
-            const ltpPaise = item.lp ? Math.round(parseFloat(item.lp) * 100) : undefined;
-            if (item.optt === 'CE' || item.tsym?.endsWith('CE')) {
-              strikeObj.ceToken = item.token;
-              strikeObj.ceSymbol = item.tsym;
-              strikeObj.ceLtpPaise = ltpPaise;
-            } else if (item.optt === 'PE' || item.tsym?.endsWith('PE')) {
-              strikeObj.peToken = item.token;
-              strikeObj.peSymbol = item.tsym;
-              strikeObj.peLtpPaise = ltpPaise;
-            }
-          }
-          const strikes = Array.from(strikesMap.values()).sort((a, b) => a.strikePrice - b.strikePrice);
           return {
-            symbol,
-            // Never invent an expiry when the broker response does not provide one.
-            expiry: parsed.data.expiry ?? '',
-            strikes,
+            ...chain,
+            dataSource: this.config.brokerMode === 'paper' ? 'SIMULATED' : 'BROKER',
+            simulated: this.config.brokerMode === 'paper',
           };
         }
       }
 
-      return { symbol, expiry: '', strikes: [] };
+      return { symbol, expiry: '', strikes: [], dataSource: 'SIMULATED', simulated: true };
     });
 
     // 1-Click Order Execution — blocked when TRADING_ENABLED=false
@@ -613,11 +601,20 @@ export class HttpServer {
       }
 
       const body = parsed.data;
+      if (this.config.brokerMode === 'live') {
+        reply.code(503).send({ error: 'Live orders are blocked until token, trading symbol, expiry, and lot size can be verified against the authoritative instrument master.' });
+        return;
+      }
       const totalQty = body.lots * body.lotSize;
 
       // Fetch quote for current LTP
       const quote = await this.broker.getQuotes(body.exchange, body.token);
-      const ltpPaise = quote.lp ? Math.round(parseFloat(quote.lp) * 100) : 10000;
+      const parsedLtp = Number.parseFloat(quote.lp ?? '');
+      if (quote.stat !== 'Ok' || !Number.isFinite(parsedLtp) || parsedLtp <= 0) {
+        reply.code(422).send({ error: 'A valid live broker quote is required before placing an order.' });
+        return;
+      }
+      const ltpPaise = Math.round(parsedLtp * 100);
       const bestAskPaise = quote.sp1 ? Math.round(parseFloat(quote.sp1) * 100) : undefined;
 
       const ladderConfig = body.ladderConfig ?? {

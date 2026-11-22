@@ -155,14 +155,18 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
 ### 4.3 Check Authentication & Readiness Status
 - **Method & Path:** `GET /api/auth/status`
 - **Auth:** Required (`Authorization: Bearer <JWT>`, `X-Device-Id: <UUID>`)
-- **Description:** Returns the current Flattrade authentication progress and connection status. `AUTHENTICATED` confirms the broker WebSocket accepted authentication; it does not imply a SENSEX market-data subscription has produced fresh ticks.
+- **Description:** Separately reports `sessionValid`, WebSocket transport (`wsTransportConnected`), broker WebSocket authentication (`wsAuthenticated`), and fresh ticks for every subscribed instrument (`marketDataReady`). A stored session token alone never proves broker connectivity. `FEED_READY` requires fresh ticks for every active subscription.
 - **Response `200 OK`:**
 ```json
 {
   "status": "AUTHENTICATED",
   "brokerConnected": true,
-  "wsFeedHealthy": true,
+  "wsFeedHealthy": false,
   "wsFeedStatus": "CONNECTED",
+  "sessionValid": true,
+  "wsTransportConnected": true,
+  "wsAuthenticated": true,
+  "marketDataReady": false,
   "tradeDate": "2026-11-22",
   "brokerMode": "live",
   "tradingEnabled": false
@@ -173,7 +177,8 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
   - `AUTHENTICATING`: Server is executing the Flattrade authentication handshake.
   - `AUTHENTICATED`: Broker session established, connecting to feeds.
   - `WEBSOCKET_CONNECTING`: Broker WebSocket connection in progress.
-  - `FEED_READY`: Authenticated and live market-data feed is verified healthy. The current implementation does not emit this until an instrument subscription and fresh-tick check are wired.
+  - `FEED_READY`: Authenticated socket and recent ticks for every active subscription.
+  - `WEBSOCKET_DISCONNECTED`: Valid session exists but the broker socket is disconnected.
   - `AUTHENTICATION_FAILED`: Authentication attempt failed.
 
 ---
@@ -182,12 +187,12 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
 
 ### 5.1 Get Option Chain
 - **Method & Path:** `GET /api/option-chain?symbol=SENSEX&strikes=10`
-- **Description:** Retrieves option-chain values returned by the broker for SENSEX (BFO) or NIFTY/BANKNIFTY (NFO), with tokens, symbols, and LTPs. Expiry and lot-size values must come from validated instrument metadata; the client does not invent them.
+- **Description:** Paper mode returns an empty simulated chain and never fabricates expiries, tokens, or prices. LIVE currently returns `503` because no authoritative instrument master or fresh index-token quote is configured; the documented Flattrade `GetOptionChain` input requires a tradable option/future symbol and a nonzero underlying midpoint. Android does not infer ATM from stale UI spot values.
 
 ### 5.2 One-Click Order Execution
 - **Method & Path:** `POST /api/orders/one-click`
 - **Headers:** `Authorization: Bearer <JWT>`, `X-Device-Id: <UUID>`
-- **Safety Gate:** Rejects with `403 Forbidden` if `TRADING_ENABLED=false`. Rejects with `422 Unprocessable Entity` if broker account state is uncertain.
+- **Safety Gate:** Rejects with `403 Forbidden` if `TRADING_ENABLED=false`. Rejects LIVE order attempts with `503` until contract token, trading symbol, expiry, and lot size can be verified against an authoritative instrument master. Rejects with `422 Unprocessable Entity` if broker account state is uncertain or a valid quote is unavailable.
 - **Request Body:**
 ```json
 {
