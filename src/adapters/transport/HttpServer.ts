@@ -140,6 +140,10 @@ export class HttpServer {
                   '*.jKey',
                   '*.token',
                   'headers.authorization',
+                  'req.query.code',
+                  'req.query.request_code',
+                  'query.code',
+                  'query.request_code',
                 ],
                 censor: '[REDACTED]',
               },
@@ -160,8 +164,12 @@ export class HttpServer {
     this.app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
       const url = request.url.split('?')[0] ?? '';
 
-      // Skip public routes and device provisioning endpoint
-      if (!url.startsWith('/api/') || url === '/api/auth/provision-device') {
+      // Skip public routes, OAuth callback, and device provisioning endpoint
+      if (
+        !url.startsWith('/api/') ||
+        url === '/api/auth/provision-device' ||
+        url === '/api/auth/flattrade/callback'
+      ) {
         return;
       }
 
@@ -332,14 +340,16 @@ export class HttpServer {
     // Unauthenticated Auth Endpoints
     // -------------------------------------------------------------
 
-    // Flattrade OAuth Redirect Callback
-    this.app.get('/auth/flattrade/callback', async (request, reply) => {
+    // Flattrade OAuth Redirect Callback Handler
+    // Accepts request_code (or code) from Flattrade WALL / portal redirect and exchanges for session token.
+    const flattradeCallbackHandler = async (request: FastifyRequest, reply: FastifyReply) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const query = request.query as any;
-      const code = query.code || query.request_code;
+      const query = (request.query as any) ?? {};
+      const rawCode = query.request_code || query.code;
+      const code = typeof rawCode === 'string' ? rawCode.trim() : '';
 
-      if (!code || typeof code !== 'string') {
-        reply.code(400).send({ error: 'Missing code parameter in OAuth callback' });
+      if (!code) {
+        reply.code(400).send({ error: 'Missing request_code parameter in OAuth callback' });
         return;
       }
 
@@ -358,9 +368,15 @@ export class HttpServer {
         reply.redirect('scalper://auth/success', 302);
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
+        this.app.log.error('Flattrade OAuth exchange failed: %s', errMsg);
         reply.code(500).send({ error: `OAuth exchange failed: ${errMsg}` });
       }
-    });
+    };
+
+    // Exact Flattrade OAuth Callback endpoint
+    this.app.get('/api/auth/flattrade/callback', flattradeCallbackHandler);
+    // Legacy alias for backwards compatibility with earlier portal registrations
+    this.app.get('/auth/flattrade/callback', flattradeCallbackHandler);
 
     // -------------------------------------------------------------
     // Device Provisioning Endpoints

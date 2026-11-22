@@ -32,7 +32,7 @@ export const EnvSchema = z.object({
     .optional(),
   FLATTRADE_API_KEY: z.string().default('MOCK_KEY'),
   FLATTRADE_API_SECRET: z.string().default('MOCK_SECRET'),
-  FLATTRADE_REDIRECT_URL: z.string().default('http://127.0.0.1:3000/auth/flattrade/callback'),
+  FLATTRADE_REDIRECT_URL: z.string().default('https://trade.nagabyte.com/api/auth/flattrade/callback'),
   FLATTRADE_ACCOUNT_ID: z.string().optional(),
   FLATTRADE_WS_URL: z.string().optional(),
   FLATTRADE_AUTH_BASE_URL: z.string().optional(), // For testing or custom auth host

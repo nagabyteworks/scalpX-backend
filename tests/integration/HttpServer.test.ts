@@ -230,4 +230,53 @@ describe('HttpServer Transport Layer Integration', () => {
     expect(exitRes.status).toBe(200);
     expect(engine.getAllPositions().length).toBe(0);
   });
+
+  describe('Flattrade OAuth Callback Endpoints', () => {
+    it('GET /api/auth/flattrade/callback rejects request missing request_code and code with 400', async () => {
+      const res = await fetch(`${baseUrl}/api/auth/flattrade/callback`);
+      expect(res.status).toBe(400);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data = (await res.json()) as any;
+      expect(data.error).toBe('Missing request_code parameter in OAuth callback');
+    });
+
+    it('GET /api/auth/flattrade/callback rejects empty whitespace request_code with 400', async () => {
+      const res = await fetch(`${baseUrl}/api/auth/flattrade/callback?request_code=%20%20`);
+      expect(res.status).toBe(400);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data = (await res.json()) as any;
+      expect(data.error).toBe('Missing request_code parameter in OAuth callback');
+    });
+
+    it('GET /api/auth/flattrade/callback succeeds with request_code, unauthenticated, and redirects 302 to scalper://auth/success', async () => {
+      const res = await fetch(`${baseUrl}/api/auth/flattrade/callback?request_code=MOCK_FLATTRADE_CODE_123`, {
+        redirect: 'manual',
+      });
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe('scalper://auth/success');
+
+      // Verify token persisted in SQLite store for today
+      const todaySession = await sessionService.getValidTodaySession();
+      expect(todaySession).toBeTruthy();
+    });
+
+    it('GET /api/auth/flattrade/callback succeeds with code parameter (fallback)', async () => {
+      const res = await fetch(`${baseUrl}/api/auth/flattrade/callback?code=MOCK_LEGACY_CODE_456`, {
+        redirect: 'manual',
+      });
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe('scalper://auth/success');
+    });
+
+    it('GET /auth/flattrade/callback legacy alias route also succeeds with 302 redirect', async () => {
+      const res = await fetch(`${baseUrl}/auth/flattrade/callback?request_code=MOCK_ALIAS_CODE_789`, {
+        redirect: 'manual',
+      });
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe('scalper://auth/success');
+    });
+  });
 });

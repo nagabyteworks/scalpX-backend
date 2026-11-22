@@ -118,23 +118,62 @@
         }
       }
     },
-    "/auth/flattrade/callback": {
+    "/api/auth/flattrade/callback": {
       "get": {
         "summary": "Flattrade OAuth Callback",
-        "description": "Receives authorization code from Flattrade OAuth redirect, executes SHA-256 token exchange from EC2, and redirects to Android app.",
+        "description": "Receives authorization request_code from Flattrade WALL / portal redirect, executes SHA-256 token exchange from EC2, persists session in SQLite WAL, and redirects to Android app.",
         "security": [],
         "parameters": [
           {
-            "name": "code",
+            "name": "request_code",
             "in": "query",
             "required": true,
             "schema": { "type": "string" },
-            "description": "Authorization request code from Flattrade portal"
+            "description": "Authorization request code passed by Flattrade OAuth redirect"
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Legacy fallback authorization code parameter"
           }
         ],
         "responses": {
           "302": {
-            "description": "Redirects to scalper://auth/success on success or scalper://auth/error on failure"
+            "description": "Redirects to scalper://auth/success on success"
+          },
+          "400": {
+            "description": "Missing or invalid request_code parameter"
+          },
+          "500": {
+            "description": "OAuth token exchange error"
+          }
+        }
+      }
+    },
+    "/auth/flattrade/callback": {
+      "get": {
+        "summary": "Flattrade OAuth Callback (Legacy Alias)",
+        "description": "Legacy alias for /api/auth/flattrade/callback to maintain backwards compatibility.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "request_code",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirects to scalper://auth/success"
           }
         }
       }

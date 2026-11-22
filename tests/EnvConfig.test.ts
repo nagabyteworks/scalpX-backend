@@ -9,7 +9,7 @@ const VALID_LIVE_ENV = {
   FLATTRADE_PASSWORD_SHA256: 'a'.repeat(64),
   FLATTRADE_API_KEY: 'real_api_key',
   FLATTRADE_API_SECRET: 'real_api_secret',
-  FLATTRADE_REDIRECT_URL: 'https://trade.nagabyte.com/auth/flattrade/callback',
+  FLATTRADE_REDIRECT_URL: 'https://trade.nagabyte.com/api/auth/flattrade/callback',
   DB_SESSION_ENCRYPTION_KEY: 'b'.repeat(64),
 };
 
@@ -20,6 +20,7 @@ describe('env.ts Config Validation', () => {
       expect(cfg.BROKER_MODE).toBe('paper');
       expect(cfg.TRADING_ENABLED).toBe(false);
       expect(cfg.HOST).toBe('127.0.0.1');
+      expect(cfg.FLATTRADE_REDIRECT_URL).toBe('https://trade.nagabyte.com/api/auth/flattrade/callback');
     });
 
     it('defaults TRADING_ENABLED to false', () => {

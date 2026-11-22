@@ -60,6 +60,13 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
 }
 ```
 
+### 2.4 Flattrade OAuth Callback
+- **Method & Path:** `GET /api/auth/flattrade/callback?request_code=<REQUEST_CODE>` (Legacy alias: `GET /auth/flattrade/callback`)
+- **Description:** Receives the OAuth authentication `request_code` from Flattrade WALL / browser redirect, completes SHA256 token exchange from EC2, boots live feeds, reconciles positions, and redirects to Android app deep link.
+- **Parameters:**
+  - `request_code`: Authorization request code from Flattrade OAuth redirect (or `code` for backwards compatibility).
+- **Response:** `302 Found` with `Location: scalper://auth/success`
+
 ---
 
 ## 3. Device Provisioning & Management

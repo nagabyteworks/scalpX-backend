@@ -104,10 +104,18 @@ export class SessionService {
    * Exchanges OAuth request_code for session token, persists to SQLite, and updates broker client.
    */
   async exchangeAndSaveToken(requestCode: string): Promise<string> {
-    const token = await this.broker.exchangeOAuthToken(requestCode);
+    let token: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (this.brokerMode === 'paper' && typeof (this.broker as any).exchangeOAuthToken !== 'function') {
+      token = `PAPER_SESSION_${Date.now()}`;
+    } else {
+      token = await this.broker.exchangeOAuthToken(requestCode);
+    }
     const today = getTodayDateIST();
     await this.stateStore.saveDailySession(today, token);
-    this.broker.setSessionToken(token);
+    if (typeof this.broker.setSessionToken === 'function') {
+      this.broker.setSessionToken(token);
+    }
 
     if (this.wsFeed) {
       this.wsFeed.updateSessionToken(token);
@@ -139,7 +147,9 @@ export class SessionService {
     const today = getTodayDateIST();
     const token = await this.stateStore.getDailySession(today);
     if (token) {
-      this.broker.setSessionToken(token);
+      if (typeof this.broker.setSessionToken === 'function') {
+        this.broker.setSessionToken(token);
+      }
       return token;
     }
     return null;

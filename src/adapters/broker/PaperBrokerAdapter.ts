@@ -48,6 +48,15 @@ export class PaperBrokerAdapter implements BrokerPort {
   private readonly currentLtpMap = new Map<string, number>();
   private orderSeq = 0;
   private simulatedLatencyMs = 0;
+  private sessionToken: string | null = null;
+
+  setSessionToken(token: string): void {
+    this.sessionToken = token;
+  }
+
+  getSessionToken(): string | null {
+    return this.sessionToken;
+  }
 
   // Audit counters for test verification
   private placeCount = 0;

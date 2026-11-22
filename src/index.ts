@@ -133,7 +133,7 @@ async function bootstrap() {
       }
     }
   } else {
-    console.log('ℹ️ No active session for today. Complete OTP login via POST /api/auth/daily-login or OAuth via /auth/flattrade/callback.');
+    console.log('ℹ️ No active session for today. Complete OTP login via POST /api/auth/daily-login or OAuth via /api/auth/flattrade/callback.');
   }
 
   // 10. Start Fastify HTTP Server

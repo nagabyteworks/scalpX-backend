@@ -202,6 +202,7 @@ describe('Device Provisioning & Authorization Security', () => {
       expect(swagger.info.title).toContain('scalpX');
       expect(swagger.paths['/api/orders/one-click']).toBeDefined();
       expect(swagger.paths['/api/auth/provision-device']).toBeDefined();
+      expect(swagger.paths['/api/auth/flattrade/callback']).toBeDefined();
     });
   });
 });
