@@ -42,12 +42,8 @@ export const EnvSchema = z.object({
     .regex(/^[a-f0-9]{64}$/i, 'DB_SESSION_ENCRYPTION_KEY must be a 64-char hex string')
     .optional(),
 
-  // Persistence & Risk
+  // Persistence
   DB_PATH: z.string().default('./scalpx.db'),
-  MAX_LOTS_PER_ORDER: z.coerce.number().default(4),
-  DEFAULT_LOT_SIZE: z.coerce.number().default(25),
-  MAX_OPEN_QTY_PER_SYMBOL: z.coerce.number().default(200),
-  MAX_DAILY_LOSS_PAISE: z.coerce.number().default(500000), // 5,000 INR
 });
 
 export type RawAppEnv = z.infer<typeof EnvSchema>;

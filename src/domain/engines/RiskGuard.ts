@@ -8,10 +8,10 @@ export class RiskViolationError extends Error {
 }
 
 export interface RiskLimits {
-  maxLotsPerOrder: number;
-  lotSize: number;
-  maxOpenQtyPerSymbol: number;
-  maxDailyLossPaise: number;
+  maxLotsPerOrder?: number;
+  lotSize?: number;
+  maxOpenQtyPerSymbol?: number;
+  maxDailyLossPaise?: number;
   rateLimitCapacity?: number; // Default 6 tokens
   refillRatePerSec?: number; // Default 6 tokens/sec
 }
@@ -67,7 +67,7 @@ export class RiskGuard {
   private readonly normalPriorityQueue: QueuedTask<unknown>[] = [];
   private processTimer: NodeJS.Timeout | null = null;
 
-  constructor(limits: RiskLimits, persistence?: RiskPersistencePort) {
+  constructor(limits: RiskLimits = {}, persistence?: RiskPersistencePort) {
     this.limits = limits;
     this.capacity = limits.rateLimitCapacity ?? 6;
     this.refillRatePerSec = limits.refillRatePerSec ?? 6;
@@ -134,19 +134,22 @@ export class RiskGuard {
     }
 
     if (this.isKillSwitchTriggered()) {
+      const limitText = this.limits.maxDailyLossPaise !== undefined ? ` limit ${this.limits.maxDailyLossPaise} paise.` : '.';
       throw new RiskViolationError(
-        `Daily kill switch triggered. Cumulative daily loss: ${Math.abs(this.realizedPnlPaise)} paise exceeds limit ${this.limits.maxDailyLossPaise} paise.`
+        `Daily kill switch triggered. Cumulative daily loss: ${Math.abs(this.realizedPnlPaise)} paise exceeds${limitText}`
       );
     }
 
-    const orderLots = params.quantity / this.limits.lotSize;
-    if (orderLots > this.limits.maxLotsPerOrder) {
-      throw new RiskViolationError(
-        `Order quantity ${params.quantity} (${orderLots} lots) exceeds max lots per order limit of ${this.limits.maxLotsPerOrder} lots.`
-      );
+    if (this.limits.maxLotsPerOrder !== undefined && this.limits.lotSize !== undefined) {
+      const orderLots = params.quantity / this.limits.lotSize;
+      if (orderLots > this.limits.maxLotsPerOrder) {
+        throw new RiskViolationError(
+          `Order quantity ${params.quantity} (${orderLots} lots) exceeds max lots per order limit of ${this.limits.maxLotsPerOrder} lots.`
+        );
+      }
     }
 
-    if (params.side === 'BUY') {
+    if (this.limits.maxOpenQtyPerSymbol !== undefined && params.side === 'BUY') {
       const resultingQty = params.currentOpenQty + params.quantity;
       if (resultingQty > this.limits.maxOpenQtyPerSymbol) {
         throw new RiskViolationError(
@@ -163,14 +166,18 @@ export class RiskGuard {
    */
   recordRealizedPnl(pnlPaise: number): void {
     this.realizedPnlPaise += pnlPaise;
-    if (this.realizedPnlPaise <= -this.limits.maxDailyLossPaise) {
+    if (this.limits.maxDailyLossPaise !== undefined && this.realizedPnlPaise <= -this.limits.maxDailyLossPaise) {
       this.isKilled = true;
     }
     this.persistState();
   }
 
   isKillSwitchTriggered(): boolean {
-    return this.isKilled || this.realizedPnlPaise <= -this.limits.maxDailyLossPaise;
+    if (this.isKilled) return true;
+    if (this.limits.maxDailyLossPaise !== undefined && this.realizedPnlPaise <= -this.limits.maxDailyLossPaise) {
+      return true;
+    }
+    return false;
   }
 
   getRealizedPnlPaise(): number {
