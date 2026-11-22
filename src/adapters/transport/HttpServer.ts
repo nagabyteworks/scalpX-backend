@@ -2,6 +2,12 @@ import fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply }
 import cors from '@fastify/cors';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { SessionService, CooldownActiveError } from '../../application/SessionService.js';
 import {
   AuthSessionFailedError,
@@ -629,6 +635,22 @@ export class HttpServer {
         openPositionsCount: activePositions.length,
         timestamp: Date.now(),
       };
+    });
+
+    // OpenAPI Swagger JSON specification
+    this.app.get('/docs/swagger.json', async (_req, reply) => {
+      const candidates = [
+        path.resolve(process.cwd(), 'docs/swagger.json'),
+        path.resolve(process.cwd(), 'swagger.json'),
+        path.resolve(__dirname, '../../../docs/swagger.json'),
+        path.resolve(__dirname, '../../../swagger.json'),
+      ];
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          return reply.header('Content-Type', 'application/json').send(fs.readFileSync(p, 'utf8'));
+        }
+      }
+      reply.code(404).send({ error: 'Swagger specification not found' });
     });
   }
 

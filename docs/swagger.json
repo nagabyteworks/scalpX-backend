@@ -1,0 +1,763 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "scalpX Authoritative Trading Engine API",
+    "description": "Server-authoritative one-click options execution, stepped trailing stop-loss (RatchetLadderEngine), and Flattrade API V2 integration engine.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "scalpX Trading Systems",
+      "url": "https://trade.nagabyte.com"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://trade.nagabyte.com",
+      "description": "Production AWS EC2 (Mumbai ap-south-1)"
+    },
+    {
+      "url": "http://127.0.0.1:3000",
+      "description": "Local Development Server"
+    },
+    {
+      "url": "http://10.0.2.2:3000",
+      "description": "Android Emulator Loopback"
+    }
+  ],
+  "security": [
+    {
+      "BearerAuth": [],
+      "DeviceIdAuth": []
+    }
+  ],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "summary": "Liveness Probe",
+        "description": "Returns 200 OK if the Fastify process is responsive. Used by process managers and monitoring.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Server process is live",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "timestamp"],
+                  "properties": {
+                    "status": { "type": "string", "example": "live" },
+                    "timestamp": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "summary": "Readiness Probe",
+        "description": "Returns 200 OK only when the broker session is authenticated, live feeds are connected, and broker account state is verified. Returns 503 Service Unavailable if unready.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Engine is ready for trading operations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "brokerConnected", "wsFeedHealthy", "accountStateUncertain", "timestamp"],
+                  "properties": {
+                    "status": { "type": "string", "example": "ready" },
+                    "brokerConnected": { "type": "boolean", "example": true },
+                    "wsFeedHealthy": { "type": "boolean", "example": true },
+                    "accountStateUncertain": { "type": "boolean", "example": false },
+                    "timestamp": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine is not ready for trading operations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "brokerConnected", "wsFeedHealthy", "accountStateUncertain", "timestamp"],
+                  "properties": {
+                    "status": { "type": "string", "example": "not_ready" },
+                    "brokerConnected": { "type": "boolean", "example": false },
+                    "wsFeedHealthy": { "type": "boolean", "example": false },
+                    "accountStateUncertain": { "type": "boolean", "example": false },
+                    "timestamp": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Comprehensive System Health Check",
+        "description": "Returns full status of backend, broker mode, market feed state, open positions count, memory RSS, and uptime.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/flattrade/callback": {
+      "get": {
+        "summary": "Flattrade OAuth Callback",
+        "description": "Receives authorization code from Flattrade OAuth redirect, executes SHA-256 token exchange from EC2, and redirects to Android app.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Authorization request code from Flattrade portal"
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirects to scalper://auth/success on success or scalper://auth/error on failure"
+          }
+        }
+      }
+    },
+    "/api/auth/provision-device": {
+      "post": {
+        "summary": "Owner Device Provisioning",
+        "description": "Enrolls a new client device by verifying the high-entropy enrollment secret configured on EC2. Issues a 30-day device-bound JWT.",
+        "security": [
+          { "DeviceIdAuth": [] }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProvisionDeviceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device successfully enrolled and bound",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionDeviceResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/400BadRequest" },
+          "401": { "$ref": "#/components/responses/401Unauthorized" },
+          "403": { "$ref": "#/components/responses/403Forbidden" },
+          "429": { "$ref": "#/components/responses/429TooManyRequests" }
+        }
+      }
+    },
+    "/api/auth/revoke-device": {
+      "post": {
+        "summary": "Revoke Authorized Device",
+        "description": "Revokes a device authorization. Any future requests with this device ID are immediately rejected.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["deviceId"],
+                "properties": {
+                  "deviceId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "ok" },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/400BadRequest" },
+          "401": { "$ref": "#/components/responses/401Unauthorized" }
+        }
+      }
+    },
+    "/api/auth/login-url": {
+      "get": {
+        "summary": "Get Flattrade OAuth URL",
+        "description": "Returns the official Flattrade OAuth login URL to open in Chrome Custom Tabs as a secondary fallback.",
+        "responses": {
+          "200": {
+            "description": "OAuth URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["loginUrl"],
+                  "properties": {
+                    "loginUrl": { "type": "string", "format": "uri" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/401Unauthorized" }
+        }
+      }
+    },
+    "/api/auth/daily-login": {
+      "post": {
+        "summary": "Daily Broker OTP Authentication",
+        "description": "Submits the morning 6-digit SMS OTP or TOTP. The server executes the 3-step Flattrade auth chain from its static IPv4 EC2 instance to establish the daily session.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["otp"],
+                "properties": {
+                  "otp": { "type": "string", "pattern": "^[0-9]{6}$", "example": "123456" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Daily login successful and session established",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyLoginResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/400BadRequest" },
+          "401": { "$ref": "#/components/responses/401Unauthorized" }
+        }
+      }
+    },
+    "/api/option-chain": {
+      "get": {
+        "summary": "Fetch Option Chain",
+        "description": "Retrieves real-time strikes, token mapping, and current LTPs for the selected index and expiry.",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "default": "NIFTY" },
+            "description": "Underlying symbol"
+          },
+          {
+            "name": "expiry",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Expiry date format (e.g., 26-NOV-2026)"
+          },
+          {
+            "name": "strikes",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "default": 10 },
+            "description": "Number of strikes above and below ATM"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Option chain strikes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionChainResponse"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/401Unauthorized" }
+        }
+      }
+    },
+    "/api/orders/one-click": {
+      "post": {
+        "summary": "One-Click Order Execution",
+        "description": "Places entry order at broker, attaches stepped trailing stop-loss ladder, and places exchange-resident SL-LMT order. Blocked if TRADING_ENABLED=false or account state is uncertain.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OneClickOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order submitted and active ladder created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LadderPosition"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/400BadRequest" },
+          "401": { "$ref": "#/components/responses/401Unauthorized" },
+          "403": {
+            "description": "Order entry blocked (TRADING_ENABLED=false)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Order entry blocked due to uncertain account state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ladders/{token}": {
+      "patch": {
+        "summary": "Live Edit Ladder Parameters",
+        "description": "Updates local trailing milestone, step size, breakout buffers, or pause state for an active position.",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Instrument exchange token"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchLadderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated ladder position",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LadderPosition"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Position not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/exit-position": {
+      "post": {
+        "summary": "Exit Single Position",
+        "description": "Locks position, cancels active exchange SL-LMT, verifies remaining broker quantity, submits marketable exit limit order, and confirms fill.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExitPositionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Position exit executed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExitPositionResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/400BadRequest" },
+          "500": { "$ref": "#/components/responses/500InternalError" }
+        }
+      }
+    },
+    "/api/orders/exit-all": {
+      "post": {
+        "summary": "Panic Exit All Positions",
+        "description": "Executes emergency panic exit across all open positions with high priority preemption over normal queue.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExitAllRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "All open positions successfully exited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExitAllResponse"
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Multi-Status: Some positions exited successfully while others failed or require reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": false },
+                    "message": { "type": "string" },
+                    "errors": { "type": "array", "items": { "type": "string" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trades/today": {
+      "get": {
+        "summary": "Today's Trades & Position Summary",
+        "description": "Returns active positions, open positions count, and timestamp for current trading date.",
+        "responses": {
+          "200": {
+            "description": "Current day trade summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodayTradesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/docs/swagger.json": {
+      "get": {
+        "summary": "OpenAPI Swagger JSON Specification",
+        "description": "Returns the complete OpenAPI 3.0 specification for the scalpX backend.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI specification document",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "HS256 signed backend JWT with embedded deviceId claim."
+      },
+      "DeviceIdAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Device-Id",
+        "description": "Client device permanent UUID. Must match token deviceId claim."
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status", "brokerMode", "brokerConnected", "wsFeedHealthy",
+          "wsFeedStatus", "tradingEnabled", "accountStateUncertain",
+          "openPositionsCount", "memoryRssMb", "uptimeSec", "timestamp"
+        ],
+        "properties": {
+          "status": { "type": "string", "example": "ok" },
+          "brokerMode": { "type": "string", "enum": ["paper", "live"], "example": "paper" },
+          "brokerConnected": { "type": "boolean", "example": true },
+          "wsFeedHealthy": { "type": "boolean", "example": true },
+          "wsFeedStatus": { "type": "string", "enum": ["FEED_CONNECTED", "FEED_CONNECTING", "FEED_DISCONNECTED", "FEED_STALE"] },
+          "tradingEnabled": { "type": "boolean", "example": false },
+          "accountStateUncertain": { "type": "boolean", "example": false },
+          "openPositionsCount": { "type": "integer", "example": 0 },
+          "memoryRssMb": { "type": "integer", "example": 68 },
+          "uptimeSec": { "type": "integer", "example": 1420 },
+          "timestamp": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ProvisionDeviceRequest": {
+        "type": "object",
+        "required": ["enrollmentSecret"],
+        "properties": {
+          "enrollmentSecret": { "type": "string", "description": "High-entropy secret configured on server (/etc/scalpx/env)" },
+          "deviceName": { "type": "string", "default": "Android Device" }
+        }
+      },
+      "ProvisionDeviceResponse": {
+        "type": "object",
+        "required": ["status", "token", "deviceId", "expiresAt"],
+        "properties": {
+          "status": { "type": "string", "example": "ok" },
+          "token": { "type": "string", "description": "30-day device-bound JWT" },
+          "deviceId": { "type": "string", "format": "uuid" },
+          "expiresAt": { "type": "integer", "example": 1735000000000 }
+        }
+      },
+      "DailyLoginResponse": {
+        "type": "object",
+        "required": ["status", "message", "brokerConnected"],
+        "properties": {
+          "status": { "type": "string", "example": "ok" },
+          "message": { "type": "string" },
+          "brokerConnected": { "type": "boolean", "example": true },
+          "tradeDate": { "type": "string", "example": "2026-11-22" }
+        }
+      },
+      "OptionStrike": {
+        "type": "object",
+        "required": ["strikePrice"],
+        "properties": {
+          "strikePrice": { "type": "number", "example": 24500 },
+          "ceToken": { "type": "string", "nullable": true, "example": "26000" },
+          "ceSymbol": { "type": "string", "nullable": true, "example": "NIFTY26NOV24500CE" },
+          "ceLtpPaise": { "type": "integer", "nullable": true, "example": 10500 },
+          "peToken": { "type": "string", "nullable": true, "example": "26001" },
+          "peSymbol": { "type": "string", "nullable": true, "example": "NIFTY26NOV24500PE" },
+          "peLtpPaise": { "type": "integer", "nullable": true, "example": 9800 }
+        }
+      },
+      "OptionChainResponse": {
+        "type": "object",
+        "required": ["symbol", "expiry", "strikes"],
+        "properties": {
+          "symbol": { "type": "string", "example": "NIFTY" },
+          "expiry": { "type": "string", "example": "26-NOV-2026" },
+          "strikes": { "type": "array", "items": { "$ref": "#/components/schemas/OptionStrike" } }
+        }
+      },
+      "LadderConfig": {
+        "type": "object",
+        "required": ["stepSizePaise", "breakoutBufferPaise", "slippageBufferPaise"],
+        "properties": {
+          "firstMilestonePaise": { "type": "integer", "nullable": true, "example": 11000 },
+          "stepSizePaise": { "type": "integer", "example": 500 },
+          "breakoutBufferPaise": { "type": "integer", "example": 100 },
+          "slippageBufferPaise": { "type": "integer", "example": 150 }
+        }
+      },
+      "OneClickOrderRequest": {
+        "type": "object",
+        "required": ["commandId", "token", "tradingSymbol", "lots", "lotSize"],
+        "properties": {
+          "commandId": { "type": "string", "format": "uuid" },
+          "token": { "type": "string", "example": "26000" },
+          "tradingSymbol": { "type": "string", "example": "NIFTY26NOV24500CE" },
+          "exchange": { "type": "string", "default": "NFO" },
+          "side": { "type": "string", "enum": ["BUY", "SELL"], "default": "BUY" },
+          "lots": { "type": "integer", "minimum": 1, "example": 2 },
+          "lotSize": { "type": "integer", "minimum": 1, "example": 25 },
+          "product": { "type": "string", "enum": ["I", "M"], "default": "I" },
+          "initialSlPoints": { "type": "number", "nullable": true, "example": 10.0 },
+          "ladderConfig": { "$ref": "#/components/schemas/LadderConfig" }
+        }
+      },
+      "LadderPosition": {
+        "type": "object",
+        "required": [
+          "token", "symbol", "side", "quantity", "entryPricePaise",
+          "nextMilestonePaise", "stepSizePaise", "breakoutBufferPaise",
+          "slippageBufferPaise", "status", "isPaused"
+        ],
+        "properties": {
+          "token": { "type": "string", "example": "26000" },
+          "symbol": { "type": "string", "example": "NIFTY26NOV24500CE" },
+          "side": { "type": "string", "example": "BUY" },
+          "quantity": { "type": "integer", "example": 50 },
+          "entryPricePaise": { "type": "integer", "example": 10005 },
+          "nextMilestonePaise": { "type": "integer", "example": 11000 },
+          "stepSizePaise": { "type": "integer", "example": 500 },
+          "breakoutBufferPaise": { "type": "integer", "example": 100 },
+          "slippageBufferPaise": { "type": "integer", "example": 150 },
+          "activeSlOrderId": { "type": "string", "nullable": true, "example": "FT_SL_991" },
+          "activeSlTriggerPaise": { "type": "integer", "nullable": true, "example": 9005 },
+          "activeSlLimitPaise": { "type": "integer", "nullable": true, "example": 8855 },
+          "status": { "type": "string", "example": "OPEN" },
+          "isPaused": { "type": "boolean", "example": false }
+        }
+      },
+      "PatchLadderRequest": {
+        "type": "object",
+        "properties": {
+          "nextMilestonePaise": { "type": "integer", "nullable": true },
+          "stepSizePaise": { "type": "integer", "nullable": true },
+          "breakoutBufferPaise": { "type": "integer", "nullable": true },
+          "slippageBufferPaise": { "type": "integer", "nullable": true },
+          "paused": { "type": "boolean", "nullable": true }
+        }
+      },
+      "ExitPositionRequest": {
+        "type": "object",
+        "required": ["commandId", "token"],
+        "properties": {
+          "commandId": { "type": "string", "format": "uuid" },
+          "token": { "type": "string", "example": "26000" }
+        }
+      },
+      "ExitPositionResponse": {
+        "type": "object",
+        "required": ["success", "token", "commandId", "orderId", "status"],
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "token": { "type": "string", "example": "26000" },
+          "commandId": { "type": "string", "format": "uuid" },
+          "orderId": { "type": "string", "example": "FT_ORD_EXIT_26000" },
+          "status": { "type": "string", "example": "FILLED" }
+        }
+      },
+      "ExitAllRequest": {
+        "type": "object",
+        "required": ["commandId"],
+        "properties": {
+          "commandId": { "type": "string", "format": "uuid" }
+        }
+      },
+      "ExitAllResponse": {
+        "type": "object",
+        "required": ["success", "message"],
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "message": { "type": "string", "example": "Panic exit executed for all open positions" }
+        }
+      },
+      "TodayTradesResponse": {
+        "type": "object",
+        "required": ["activePositions", "openPositionsCount", "timestamp"],
+        "properties": {
+          "activePositions": { "type": "array", "items": { "$ref": "#/components/schemas/LadderPosition" } },
+          "openPositionsCount": { "type": "integer", "example": 1 },
+          "timestamp": { "type": "integer", "example": 1732174200000 }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "message": { "type": "string" },
+          "code": { "type": "string" }
+        }
+      }
+    },
+    "responses": {
+      "400BadRequest": {
+        "description": "Validation error or invalid request payload",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "401Unauthorized": {
+        "description": "Missing, invalid, or expired JWT, or device ID mismatch",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "403Forbidden": {
+        "description": "Forbidden operation (e.g. trading disabled or device revoked)",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "429TooManyRequests": {
+        "description": "Rate limit exceeded",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "500InternalError": {
+        "description": "Internal server error or unhandled broker failure",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      }
+    }
+  }
+}

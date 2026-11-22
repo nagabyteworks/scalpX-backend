@@ -189,5 +189,19 @@ describe('Device Provisioning & Authorization Security', () => {
       expect(res.statusCode).toBe(401);
       expect(JSON.parse(res.payload).error).toContain('Device authorization has been revoked');
     });
+
+    it('GET /docs/swagger.json serves OpenAPI 3.0 specification without authentication', async () => {
+      const res = await server.app.inject({
+        method: 'GET',
+        url: '/docs/swagger.json',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const swagger = JSON.parse(res.payload);
+      expect(swagger.openapi).toBe('3.0.3');
+      expect(swagger.info.title).toContain('scalpX');
+      expect(swagger.paths['/api/orders/one-click']).toBeDefined();
+      expect(swagger.paths['/api/auth/provision-device']).toBeDefined();
+    });
   });
 });
