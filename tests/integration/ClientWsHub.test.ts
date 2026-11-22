@@ -38,7 +38,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
       });
     });
 
-    validToken = jwt.sign({ sub: 'trader1' }, JWT_SECRET, { algorithm: 'HS256' });
+    validToken = jwt.sign({ sub: 'trader1', deviceId: 'DEVICE_001' }, JWT_SECRET, { algorithm: 'HS256' });
   });
 
   afterEach(async () => {
@@ -57,7 +57,12 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
   });
 
   it('authenticates and receives initial snapshot', async () => {
-    const ws = new WebSocket(`${wsUrl}?token=${validToken}&deviceId=DEVICE_001`);
+    const ws = new WebSocket(wsUrl, {
+      headers: {
+        Authorization: `Bearer ${validToken}`,
+        'X-Device-Id': 'DEVICE_001',
+      },
+    });
 
     const firstMessage = await new Promise<string>((resolve) => {
       ws.on('message', (msg) => resolve(msg.toString()));
@@ -71,7 +76,12 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
   });
 
   it('coalesces ticks and broadcasts throttled snapshot every interval', async () => {
-    const ws = new WebSocket(`${wsUrl}?token=${validToken}&deviceId=DEVICE_001`);
+    const ws = new WebSocket(wsUrl, {
+      headers: {
+        Authorization: `Bearer ${validToken}`,
+        'X-Device-Id': 'DEVICE_001',
+      },
+    });
 
     // Register active position in engine
     engine.registerPosition({
@@ -120,7 +130,12 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
   });
 
   it('immediately pushes high-priority events bypassing throttle', async () => {
-    const ws = new WebSocket(`${wsUrl}?token=${validToken}&deviceId=DEVICE_001`);
+    const ws = new WebSocket(wsUrl, {
+      headers: {
+        Authorization: `Bearer ${validToken}`,
+        'X-Device-Id': 'DEVICE_001',
+      },
+    });
 
     await new Promise((r) => ws.on('open', r));
 

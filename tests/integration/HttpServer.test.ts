@@ -45,10 +45,13 @@ describe('HttpServer Transport Layer Integration', () => {
     sessionService = new SessionService(broker as any, stateStore, 'API_KEY');
     reconciler = new ReconcilerService(broker, feed, engine, stateStore);
 
+    stateStore.authorizeDevice('DEVICE_123', 'Test Device');
+
     server = new HttpServer(
       {
         jwtSecret: JWT_SECRET,
         brokerMode: 'paper',
+        tradingEnabled: true,
       },
       sessionService,
       orderManager,
@@ -59,7 +62,7 @@ describe('HttpServer Transport Layer Integration', () => {
     );
 
     baseUrl = await server.listen(0, '127.0.0.1');
-    validToken = jwt.sign({ sub: 'trader1' }, JWT_SECRET, { algorithm: 'HS256' });
+    validToken = jwt.sign({ sub: 'trader1', deviceId: 'DEVICE_123' }, JWT_SECRET, { algorithm: 'HS256' });
   });
 
   afterEach(async () => {
