@@ -29,7 +29,16 @@ export interface HttpServerConfig {
    * Production must set this to the Android app origin or '' to block all.
    */
   corsOrigin?: string | string[] | boolean;
+  /**
+   * One-time or master enrollment secret for owner device provisioning.
+   */
+  enrollmentSecret?: string;
 }
+
+export const ProvisionDeviceSchema = z.object({
+  enrollmentSecret: z.string().min(1, 'Enrollment secret is required'),
+  deviceName: z.string().default('Android Device'),
+});
 
 export const DailyOtpSchema = z.object({
   otp: z.string().regex(/^\d{6}$/, 'OTP must be a 6-digit numeric string'),
@@ -145,8 +154,8 @@ export class HttpServer {
     this.app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
       const url = request.url.split('?')[0] ?? '';
 
-      // Skip public routes
-      if (!url.startsWith('/api/')) {
+      // Skip public routes and device provisioning endpoint
+      if (!url.startsWith('/api/') || url === '/api/auth/provision-device') {
         return;
       }
 
@@ -164,7 +173,25 @@ export class HttpServer {
 
       const token = authHeader.substring(7);
       try {
-        const decoded = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] });
+        const decoded = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] }) as {
+          deviceId?: string;
+          sub?: string;
+          role?: string;
+        };
+
+        // Enforce device-binding: token issued for device A cannot be used from device B
+        if (decoded.deviceId && decoded.deviceId !== deviceId) {
+          reply.code(403).send({ error: 'Device ID mismatch with token claim' });
+          return;
+        }
+
+        // Enforce device revocation
+        const isRevoked = await this.stateStore.isDeviceRevoked(deviceId);
+        if (isRevoked) {
+          reply.code(401).send({ error: 'Device authorization has been revoked' });
+          return;
+        }
+
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (request as any).user = decoded;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -327,6 +354,68 @@ export class HttpServer {
         const errMsg = err instanceof Error ? err.message : String(err);
         reply.code(500).send({ error: `OAuth exchange failed: ${errMsg}` });
       }
+    });
+
+    // -------------------------------------------------------------
+    // Device Provisioning Endpoints
+    // -------------------------------------------------------------
+
+    /**
+     * POST /api/auth/provision-device
+     * Secure owner provisioning workflow:
+     * - Requires X-Device-Id header
+     * - Validates high-entropy enrollmentSecret
+     * - Issues a 30-day JWT containing { sub: 'scalpx-owner', role: 'owner', deviceId }
+     * - Stores device authorization in SQLite
+     */
+    this.app.post('/api/auth/provision-device', async (request, reply) => {
+      const deviceId = request.headers['x-device-id'];
+      if (!deviceId || typeof deviceId !== 'string' || deviceId.trim().length === 0) {
+        reply.code(400).send({ error: 'Missing required X-Device-Id header' });
+        return;
+      }
+
+      const parsed = ProvisionDeviceSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({
+          error: 'Validation failed',
+          details: parsed.error.issues,
+        });
+        return;
+      }
+
+      const { enrollmentSecret, deviceName } = parsed.data;
+      const expectedSecret = this.config.enrollmentSecret;
+      if (!expectedSecret || enrollmentSecret !== expectedSecret) {
+        reply.code(401).send({ error: 'Invalid or missing enrollment secret' });
+        return;
+      }
+
+      // Generate 30-day device-bound JWT
+      const token = jwt.sign(
+        { sub: 'scalpx-owner', role: 'owner', deviceId },
+        this.config.jwtSecret,
+        { algorithm: 'HS256', expiresIn: '30d' }
+      );
+
+      await this.stateStore.authorizeDevice(deviceId, deviceName);
+
+      return {
+        status: 'ok',
+        token,
+        deviceId,
+        expiresAt: Date.now() + 30 * 24 * 3600 * 1000,
+      };
+    });
+
+    /**
+     * POST /api/auth/revoke-device
+     * Revokes device authorization (requires authenticated session).
+     */
+    this.app.post('/api/auth/revoke-device', async (request, reply) => {
+      const deviceId = request.headers['x-device-id'] as string;
+      await this.stateStore.revokeDevice(deviceId);
+      return { status: 'ok', message: `Device ${deviceId} successfully revoked` };
     });
 
     // -------------------------------------------------------------

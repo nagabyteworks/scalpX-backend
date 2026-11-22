@@ -21,13 +21,9 @@ async function bootstrap() {
   // 2. Initialize SQLite State Store (with encryption in LIVE mode)
   const stateStore = new SqliteStateStore(env.DB_PATH, env.DB_SESSION_ENCRYPTION_KEY);
 
-  // 3. Initialize RiskGuard with persistence (crash-safe daily loss limits)
+  // 3. Initialize RiskGuard with persistence & priority token bucket rate limiter
   const riskGuard = new RiskGuard(
     {
-      lotSize: env.DEFAULT_LOT_SIZE,
-      maxLotsPerOrder: env.MAX_LOTS_PER_ORDER,
-      maxOpenQtyPerSymbol: env.MAX_OPEN_QTY_PER_SYMBOL,
-      maxDailyLossPaise: env.MAX_DAILY_LOSS_PAISE,
       rateLimitCapacity: 6,
       refillRatePerSec: 6,
     },
@@ -144,6 +140,7 @@ async function bootstrap() {
   const server = new HttpServer(
     {
       jwtSecret: env.APP_JWT_SECRET,
+      enrollmentSecret: env.DEVICE_ENROLLMENT_SECRET,
       brokerMode: env.BROKER_MODE,
       tradingEnabled: env.TRADING_ENABLED,
       flattradeWsFeed: flattradeWs,
