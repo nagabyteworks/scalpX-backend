@@ -52,6 +52,8 @@ export class SessionService {
 
   private readonly cooldownMs: number;
   private cooldownUntil = 0;
+  private authenticating = false;
+  private lastAuthError: string | null = null;
 
   constructor(
     broker: FlattradeRestAdapter,
@@ -68,6 +70,25 @@ export class SessionService {
     this.reconciler = options.reconciler;
     this.wsHub = options.wsHub;
     this.cooldownMs = options.cooldownMs ?? 15000;
+  }
+
+  isAuthenticating(): boolean {
+    return this.authenticating;
+  }
+
+  getLastAuthError(): string | null {
+    return this.lastAuthError;
+  }
+
+  hasValidSession(): boolean {
+    if (this.brokerMode === 'paper') {
+      return true;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return typeof (this.broker as any).getSessionToken === 'function'
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ? !!(this.broker as any).getSessionToken()
+      : false;
   }
 
   setAuthClient(authClient: FlattradeAuthClient): void {
@@ -119,7 +140,8 @@ export class SessionService {
 
     if (this.wsFeed) {
       this.wsFeed.updateSessionToken(token);
-      await this.wsFeed.connect().catch(() => {});
+      // Do not hide broker WebSocket authentication failures from the caller.
+      await this.wsFeed.connect();
     }
 
     if (this.reconciler) {
@@ -189,6 +211,7 @@ export class SessionService {
     }
 
     // Live Mode: Run 3-step FlattradeAuthClient handshake
+    this.authenticating = true;
     try {
       if (!this.authClient) {
         throw new Error('FlattradeAuthClient is not configured for live broker mode');
@@ -205,7 +228,7 @@ export class SessionService {
       // Connect / Update WS Feed
       if (this.wsFeed) {
         this.wsFeed.updateSessionToken(token);
-        await this.wsFeed.connect().catch(() => {});
+        await this.wsFeed.connect();
       }
 
       // Reconcile open positions
@@ -218,8 +241,9 @@ export class SessionService {
         this.wsHub.broadcastEvent('SESSION_UPDATED', { brokerConnected: true, tradeDate: today });
       }
 
-      // Success clears any cooldown
+      // Success clears any cooldown and last error
       this.cooldownUntil = 0;
+      this.lastAuthError = null;
 
       return {
         brokerConnected: true,
@@ -229,7 +253,10 @@ export class SessionService {
     } catch (err: unknown) {
       // Activate 15-second cooldown on failure
       this.cooldownUntil = Date.now() + this.cooldownMs;
+      this.lastAuthError = err instanceof Error ? err.message : String(err);
       throw err;
+    } finally {
+      this.authenticating = false;
     }
   }
 }

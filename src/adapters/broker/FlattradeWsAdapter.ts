@@ -67,7 +67,8 @@ export class FlattradeWsAdapter implements MarketFeedPort {
 
   constructor(config: FlattradeWsConfig) {
     this.config = config;
-    this.wsUrl = config.wsUrl || process.env.FLATTRADE_WS_URL || 'wss://piconnect.flattrade.in/PiConnectWSTp/';
+    // Flattrade's current Pi API v2 websocket endpoint.
+    this.wsUrl = config.wsUrl || process.env.FLATTRADE_WS_URL || 'wss://piconnect.flattrade.in/PiConnectWSAPI/';
     this.startWatchdog();
   }
 

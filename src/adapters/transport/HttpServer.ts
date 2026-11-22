@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import { SessionService, CooldownActiveError } from '../../application/SessionService.js';
+import { SessionService, CooldownActiveError, getTodayDateIST } from '../../application/SessionService.js';
 import {
   AuthSessionFailedError,
   InvalidOtpError,
@@ -89,7 +89,8 @@ export const ExitAllSchema = z.object({
 });
 
 export const OptionChainQuerySchema = z.object({
-  symbol: z.string().default('NIFTY'),
+  symbol: z.string().default('SENSEX'),
+  exchange: z.string().optional(),
   expiry: z.string().optional(),
   strikes: z.coerce.number().int().positive().default(10),
 });
@@ -356,20 +357,12 @@ export class HttpServer {
       try {
         await this.sessionService.exchangeAndSaveToken(code);
 
-        // Boot WebSocket adapter if available
-        if (this.config.flattradeWsFeed) {
-          await this.config.flattradeWsFeed.connect().catch(() => {});
-        }
-
-        // Reconcile open state
-        await this.reconciler.reconcile().catch(() => {});
-
         // Redirect to Android app deep link
         reply.redirect('scalper://auth/success', 302);
       } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        this.app.log.error('Flattrade OAuth exchange failed: %s', errMsg);
-        reply.code(500).send({ error: `OAuth exchange failed: ${errMsg}` });
+        // Broker errors may echo the request code or token. Keep them out of logs and responses.
+        this.app.log.error('Flattrade OAuth exchange failed');
+        reply.code(502).send({ error: 'OAuth exchange failed. Retry authentication.' });
       }
     };
 
@@ -480,14 +473,14 @@ export class HttpServer {
 
         if (err instanceof InvalidOtpError) {
           reply.code(401).send({
-            error: `Flattrade authentication failed: ${err.message}`,
+            error: 'Flattrade authentication failed. Check the current OTP and try again.',
           });
           return;
         }
 
         if (err instanceof FallbackRequiredError) {
           reply.code(502).send({
-            error: err.message,
+            error: 'Flattrade requires browser authentication for this attempt.',
             fallbackRequired: true,
           });
           return;
@@ -495,19 +488,63 @@ export class HttpServer {
 
         if (err instanceof TokenExchangeError || err instanceof AuthSessionFailedError) {
           reply.code(502).send({
-            error: `Flattrade communication error: ${err.message}`,
+            error: 'Flattrade authentication is temporarily unavailable. Retry later.',
           });
           return;
         }
 
-        const errMsg = err instanceof Error ? err.message : String(err);
+        this.app.log.error('Daily Flattrade authentication failed');
         reply.code(502).send({
-          error: `Login failed: ${errMsg}`,
+          error: 'Daily Flattrade authentication failed. Retry or use browser authentication.',
         });
       }
     });
 
-    // Option Chain
+    // Flattrade Authentication & Session Status Endpoint
+    this.app.get('/api/auth/status', async () => {
+      let brokerConnected = false;
+      if (this.config.brokerMode === 'paper') {
+        brokerConnected = true;
+      } else if (this.broker && 'getSessionToken' in this.broker) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        brokerConnected = !!(this.broker as any).getSessionToken?.();
+      }
+
+      let wsFeedStatus = 'NOT_APPLICABLE';
+      if (this.config.brokerMode === 'live' && this.config.flattradeWsFeed) {
+        wsFeedStatus = this.config.flattradeWsFeed.getConnectionState();
+      } else if (this.config.brokerMode === 'paper') {
+        wsFeedStatus = 'CONNECTED';
+      }
+
+      const wsFeedHealthy = wsFeedStatus === 'CONNECTED' || wsFeedStatus === 'PAPER_MODE';
+
+      let status = 'AUTHENTICATION_REQUIRED';
+      if (this.sessionService.isAuthenticating()) {
+        status = 'AUTHENTICATING';
+      } else if (!brokerConnected) {
+        status = this.sessionService.getLastAuthError() ? 'AUTHENTICATION_FAILED' : 'AUTHENTICATION_REQUIRED';
+      } else if (wsFeedHealthy) {
+        // Socket authentication is not proof that a market-data subscription has produced data.
+        status = 'AUTHENTICATED';
+      } else if (wsFeedStatus === 'CONNECTING') {
+        status = 'WEBSOCKET_CONNECTING';
+      } else {
+        status = 'AUTHENTICATED';
+      }
+
+      return {
+        status,
+        brokerConnected,
+        wsFeedHealthy,
+        wsFeedStatus,
+        tradeDate: getTodayDateIST(),
+        brokerMode: this.config.brokerMode,
+        tradingEnabled: this.config.tradingEnabled,
+      };
+    });
+
+    // Option Chain (Supports SENSEX/BFO and NIFTY/NFO)
     this.app.get('/api/option-chain', async (request, reply) => {
       const parsed = OptionChainQuerySchema.safeParse(request.query);
       if (!parsed.success) {
@@ -515,11 +552,50 @@ export class HttpServer {
         return;
       }
 
+      const symbol = parsed.data.symbol.toUpperCase();
+      const exch = parsed.data.exchange ?? (symbol === 'SENSEX' || symbol === 'BANKEX' ? 'BFO' : 'NFO');
+
       if (this.broker.getOptionChain) {
-        const chain = await this.broker.getOptionChain('NFO', parsed.data.symbol, '0', parsed.data.strikes);
-        return chain;
+        const rawChain = await this.broker.getOptionChain(exch, symbol, '0', parsed.data.strikes);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const chain = rawChain as any;
+        if (chain && Array.isArray(chain.strikes)) {
+          return chain;
+        }
+
+        // Normalize raw Flattrade values if present
+        if (chain && Array.isArray(chain.values)) {
+          const strikesMap = new Map<number, { strikePrice: number; ceToken?: string; ceSymbol?: string; ceLtpPaise?: number; peToken?: string; peSymbol?: string; peLtpPaise?: number }>();
+          for (const item of chain.values) {
+            const sp = parseFloat(item.strprc);
+            if (isNaN(sp)) continue;
+            let strikeObj = strikesMap.get(sp);
+            if (!strikeObj) {
+              strikeObj = { strikePrice: sp };
+              strikesMap.set(sp, strikeObj);
+            }
+            const ltpPaise = item.lp ? Math.round(parseFloat(item.lp) * 100) : undefined;
+            if (item.optt === 'CE' || item.tsym?.endsWith('CE')) {
+              strikeObj.ceToken = item.token;
+              strikeObj.ceSymbol = item.tsym;
+              strikeObj.ceLtpPaise = ltpPaise;
+            } else if (item.optt === 'PE' || item.tsym?.endsWith('PE')) {
+              strikeObj.peToken = item.token;
+              strikeObj.peSymbol = item.tsym;
+              strikeObj.peLtpPaise = ltpPaise;
+            }
+          }
+          const strikes = Array.from(strikesMap.values()).sort((a, b) => a.strikePrice - b.strikePrice);
+          return {
+            symbol,
+            // Never invent an expiry when the broker response does not provide one.
+            expiry: parsed.data.expiry ?? '',
+            strikes,
+          };
+        }
       }
-      return { stat: 'Ok', values: [] };
+
+      return { symbol, expiry: '', strikes: [] };
     });
 
     // 1-Click Order Execution — blocked when TRADING_ENABLED=false

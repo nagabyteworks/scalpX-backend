@@ -88,11 +88,11 @@ export class FlattradeRestAdapter implements BrokerPort {
     try {
       data = JSON.parse(responseText);
     } catch {
-      throw new Error(`Failed to parse OAuth response: ${responseText}`);
+      throw new Error('Flattrade OAuth response was invalid');
     }
 
     if (data.stat !== 'Ok' || !data.token) {
-      throw new Error(`Flattrade OAuth exchange failed: ${data.emsg ?? 'Unknown error'}`);
+      throw new Error('Flattrade OAuth exchange failed');
     }
 
     this.sessionToken = data.token;
@@ -123,7 +123,8 @@ export class FlattradeRestAdapter implements BrokerPort {
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new Error(`Failed to parse response from ${endpoint}: ${text}`);
+      // Broker error bodies are untrusted and can echo submitted credentials or jKey.
+      throw new Error('Flattrade returned an invalid response');
     }
   }
 
@@ -148,7 +149,7 @@ export class FlattradeRestAdapter implements BrokerPort {
 
     const res = await this.postForm<FlattradeOrderResponse>(FLATTRADE_ENDPOINTS.PLACE_ORDER, payload);
     if (res.stat !== 'Ok' || !res.norenordno) {
-      throw new Error(`Flattrade placeLimitOrder rejected: ${res.emsg ?? 'Unknown error'}`);
+      throw new Error('Flattrade placeLimitOrder rejected');
     }
 
     return {
@@ -183,7 +184,7 @@ export class FlattradeRestAdapter implements BrokerPort {
 
     const res = await this.postForm<FlattradeOrderResponse>(FLATTRADE_ENDPOINTS.PLACE_ORDER, payload);
     if (res.stat !== 'Ok' || !res.norenordno) {
-      throw new Error(`Flattrade placeSlLimitOrder rejected: ${res.emsg ?? 'Unknown error'}`);
+      throw new Error('Flattrade placeSlLimitOrder rejected');
     }
 
     return {
@@ -218,7 +219,7 @@ export class FlattradeRestAdapter implements BrokerPort {
 
     const res = await this.postForm<FlattradeOrderResponse>(FLATTRADE_ENDPOINTS.MODIFY_ORDER, payload);
     if (res.stat !== 'Ok') {
-      throw new Error(`Flattrade modifyOrder failed: ${res.emsg ?? 'Unknown error'}`);
+      throw new Error('Flattrade modifyOrder failed');
     }
 
     return {
@@ -236,7 +237,7 @@ export class FlattradeRestAdapter implements BrokerPort {
 
     const res = await this.postForm<{ stat: string; emsg?: string }>(FLATTRADE_ENDPOINTS.CANCEL_ORDER, payload);
     if (res.stat !== 'Ok') {
-      throw new Error(`Flattrade cancelOrder failed: ${res.emsg ?? 'Unknown error'}`);
+      throw new Error('Flattrade cancelOrder failed');
     }
   }
 

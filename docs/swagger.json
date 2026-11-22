@@ -308,6 +308,25 @@
         }
       }
     },
+    "/api/auth/status": {
+      "get": {
+        "summary": "Check Broker Authentication Status",
+        "description": "Returns current broker session authentication and WebSocket feed readiness status: AUTHENTICATION_REQUIRED, AUTHENTICATING, AUTHENTICATED, WEBSOCKET_CONNECTING, FEED_READY, AUTHENTICATION_FAILED.",
+        "responses": {
+          "200": {
+            "description": "Authentication and feed status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatusResponse"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/401Unauthorized" }
+        }
+      }
+    },
     "/api/option-chain": {
       "get": {
         "summary": "Fetch Option Chain",
@@ -619,6 +638,23 @@
           "message": { "type": "string" },
           "brokerConnected": { "type": "boolean", "example": true },
           "tradeDate": { "type": "string", "example": "2026-11-22" }
+        }
+      },
+      "AuthStatusResponse": {
+        "type": "object",
+        "required": ["status", "brokerConnected", "wsFeedHealthy", "wsFeedStatus", "tradeDate", "brokerMode", "tradingEnabled"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["AUTHENTICATION_REQUIRED", "AUTHENTICATING", "AUTHENTICATED", "WEBSOCKET_CONNECTING", "FEED_READY", "AUTHENTICATION_FAILED"],
+            "example": "FEED_READY"
+          },
+          "brokerConnected": { "type": "boolean", "example": true },
+          "wsFeedHealthy": { "type": "boolean", "example": true },
+          "wsFeedStatus": { "type": "string", "example": "CONNECTED" },
+          "tradeDate": { "type": "string", "example": "2026-11-22" },
+          "brokerMode": { "type": "string", "example": "live" },
+          "tradingEnabled": { "type": "boolean", "example": false }
         }
       },
       "OptionStrike": {

@@ -119,10 +119,11 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
 
 ## 4. Flattrade Session Lifecycle
 
-### 4.1 Single-User Daily OTP Login
+### 4.1 Single-User Daily OTP Login (Compatibility Endpoint)
 - **Method & Path:** `POST /api/auth/daily-login`
 - **Auth:** Required (`Authorization: Bearer <JWT>`, `X-Device-Id: <UUID>`)
-- **Description:** Submits the morning 6-digit SMS OTP or TOTP. The server executes the 3-step Flattrade auth chain (`/auth/session` -> `/ftauth` -> `/trade/apitoken`) from its static IPv4 Mumbai EC2 instance and establishes the daily broker session.
+- **Description:** The current implementation submits a 6-digit OTP/TOTP to the server and attempts the `/auth/session` -> `/ftauth` -> `/trade/apitoken` sequence.
+- **Broker limitation:** Flattrade's published Pi API v2 login guide documents browser authorization at `https://auth.flattrade.in/?app_key=...`, followed by a short-lived `request_code` exchange at `/trade/apitoken`. It does not document `/auth/session` or `/ftauth` as supported API operations. Use the browser callback flow unless Flattrade confirms direct OTP authentication is supported for this account/API registration. Do not describe one-TOTP login as a supported production feature until confirmed.
 - **Request Body:**
 ```json
 {
@@ -151,13 +152,37 @@ scalpX is a server-authoritative one-click options execution and ratcheting stop
 }
 ```
 
+### 4.3 Check Authentication & Readiness Status
+- **Method & Path:** `GET /api/auth/status`
+- **Auth:** Required (`Authorization: Bearer <JWT>`, `X-Device-Id: <UUID>`)
+- **Description:** Returns the current Flattrade authentication progress and connection status. `AUTHENTICATED` confirms the broker WebSocket accepted authentication; it does not imply a SENSEX market-data subscription has produced fresh ticks.
+- **Response `200 OK`:**
+```json
+{
+  "status": "AUTHENTICATED",
+  "brokerConnected": true,
+  "wsFeedHealthy": true,
+  "wsFeedStatus": "CONNECTED",
+  "tradeDate": "2026-11-22",
+  "brokerMode": "live",
+  "tradingEnabled": false
+}
+```
+- **Status Values:**
+  - `AUTHENTICATION_REQUIRED`: Daily broker session is not yet established.
+  - `AUTHENTICATING`: Server is executing the Flattrade authentication handshake.
+  - `AUTHENTICATED`: Broker session established, connecting to feeds.
+  - `WEBSOCKET_CONNECTING`: Broker WebSocket connection in progress.
+  - `FEED_READY`: Authenticated and live market-data feed is verified healthy. The current implementation does not emit this until an instrument subscription and fresh-tick check are wired.
+  - `AUTHENTICATION_FAILED`: Authentication attempt failed.
+
 ---
 
 ## 5. Authenticated Trading Endpoints (`/api/*`)
 
 ### 5.1 Get Option Chain
-- **Method & Path:** `GET /api/option-chain?symbol=NIFTY&strikes=10`
-- **Response `200 OK`:** Returns available option chain strikes and Greeks.
+- **Method & Path:** `GET /api/option-chain?symbol=SENSEX&strikes=10`
+- **Description:** Retrieves option-chain values returned by the broker for SENSEX (BFO) or NIFTY/BANKNIFTY (NFO), with tokens, symbols, and LTPs. Expiry and lot-size values must come from validated instrument metadata; the client does not invent them.
 
 ### 5.2 One-Click Order Execution
 - **Method & Path:** `POST /api/orders/one-click`

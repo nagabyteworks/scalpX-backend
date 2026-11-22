@@ -328,8 +328,36 @@ export class PaperBrokerAdapter implements BrokerPort {
     };
   }
 
-  async getOptionChain(exch: string, tsym: string, strprc: string, count: number): Promise<unknown> {
+  async getOptionChain(exch: string, tsym: string, _strprc: string, count = 10): Promise<unknown> {
     await this.applyLatency();
-    return { stat: 'Ok', values: [] };
+    const symbol = tsym.toUpperCase();
+    const isSensex = symbol === 'SENSEX';
+    const isBankNifty = symbol === 'BANKNIFTY';
+    const spot = isSensex ? 80000 : isBankNifty ? 52000 : 24500;
+    const step = isSensex || isBankNifty ? 100 : 50;
+    const expiry = isSensex ? '27-NOV-2026' : '26-NOV-2026';
+    const exchPrefix = isSensex ? 'BFO' : 'NFO';
+    const strikes = [];
+
+    for (let i = -count; i <= count; i++) {
+      const strikePrice = spot + i * step;
+      const ceToken = `${exchPrefix}_${symbol}_${strikePrice}_CE`;
+      const peToken = `${exchPrefix}_${symbol}_${strikePrice}_PE`;
+      strikes.push({
+        strikePrice,
+        ceToken,
+        ceSymbol: `${symbol}26NOV${strikePrice}CE`,
+        ceLtpPaise: Math.max(100, Math.round((spot - strikePrice + 150) * 100)),
+        peToken,
+        peSymbol: `${symbol}26NOV${strikePrice}PE`,
+        peLtpPaise: Math.max(100, Math.round((strikePrice - spot + 150) * 100)),
+      });
+    }
+
+    return {
+      symbol,
+      expiry,
+      strikes,
+    };
   }
 }

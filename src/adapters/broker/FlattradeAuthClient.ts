@@ -84,18 +84,17 @@ export class FlattradeAuthClient {
       });
 
       if (res.statusCode !== 200) {
-        throw new AuthSessionFailedError(`Flattrade /auth/session responded with status ${res.statusCode}`);
+        throw new AuthSessionFailedError();
       }
 
       const bodyText = await res.body.text();
       sid = bodyText.trim().replace(/^"|"$/g, '');
       if (!sid) {
-        throw new AuthSessionFailedError('Flattrade returned empty session ID (sid)');
+        throw new AuthSessionFailedError();
       }
     } catch (err: unknown) {
       if (err instanceof AuthSessionFailedError) throw err;
-      const errMsg = err instanceof Error ? err.message : String(err);
-      throw new AuthSessionFailedError(`Connection error during /auth/session: ${errMsg}`);
+      throw new AuthSessionFailedError();
     }
 
     // -------------------------------------------------------------
@@ -140,7 +139,8 @@ export class FlattradeAuthClient {
 
       // Check for error message from Flattrade (e.g., Invalid OTP / Invalid credentials)
       if (resJson.emsg && typeof resJson.emsg === 'string' && resJson.emsg.trim().length > 0) {
-        throw new InvalidOtpError(resJson.emsg);
+        // Do not reflect broker supplied text: it is outside our control and may contain secrets.
+        throw new InvalidOtpError();
       }
 
       // Extract RedirectURL and query param 'code'
@@ -164,8 +164,7 @@ export class FlattradeAuthClient {
       if (err instanceof InvalidOtpError || err instanceof FallbackRequiredError) {
         throw err;
       }
-      const errMsg = err instanceof Error ? err.message : String(err);
-      throw new FallbackRequiredError(`Flattrade /ftauth error: ${errMsg}`);
+      throw new FallbackRequiredError();
     }
 
     // -------------------------------------------------------------
@@ -203,15 +202,13 @@ export class FlattradeAuthClient {
       }
 
       if (resJson.stat !== 'Ok' || !resJson.token || typeof resJson.token !== 'string') {
-        const emsg = typeof resJson.emsg === 'string' ? resJson.emsg : 'Unknown error';
-        throw new TokenExchangeError(`Flattrade token exchange rejected: ${emsg}`);
+        throw new TokenExchangeError();
       }
 
       return resJson.token;
     } catch (err: unknown) {
       if (err instanceof TokenExchangeError) throw err;
-      const errMsg = err instanceof Error ? err.message : String(err);
-      throw new TokenExchangeError(`Connection error during /trade/apitoken: ${errMsg}`);
+      throw new TokenExchangeError();
     }
   }
 

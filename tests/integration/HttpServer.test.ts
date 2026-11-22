@@ -279,4 +279,47 @@ describe('HttpServer Transport Layer Integration', () => {
       expect(res.headers.get('location')).toBe('scalper://auth/success');
     });
   });
+
+  describe('Auth Status & Option Chain Endpoints', () => {
+    it('GET /api/auth/status returns current broker session and readiness', async () => {
+      const res = await fetch(`${baseUrl}/api/auth/status`, {
+        headers: {
+          'X-Device-Id': 'DEVICE_123',
+          Authorization: `Bearer ${validToken}`,
+        },
+      });
+
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data = (await res.json()) as any;
+      expect(data.status).toBeDefined();
+      expect(data.brokerMode).toBe('paper');
+      expect(data.brokerConnected).toBe(true);
+      expect(data.wsFeedHealthy).toBe(true);
+      expect(data.tradingEnabled).toBe(true);
+    });
+
+    it('GET /api/option-chain?symbol=SENSEX returns BFO strikes and valid option chain', async () => {
+      const res = await fetch(`${baseUrl}/api/option-chain?symbol=SENSEX&strikes=5`, {
+        headers: {
+          'X-Device-Id': 'DEVICE_123',
+          Authorization: `Bearer ${validToken}`,
+        },
+      });
+
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data = (await res.json()) as any;
+      expect(data.symbol).toBe('SENSEX');
+      expect(data.expiry).toBeDefined();
+      expect(Array.isArray(data.strikes)).toBe(true);
+      expect(data.strikes.length).toBeGreaterThan(0);
+
+      // Verify BFO token naming and strikes around 80000
+      const atmStrike = data.strikes.find((s: any) => s.strikePrice === 80000);
+      expect(atmStrike).toBeDefined();
+      expect(atmStrike.ceToken).toContain('BFO_SENSEX_80000_CE');
+      expect(atmStrike.peToken).toContain('BFO_SENSEX_80000_PE');
+    });
+  });
 });
