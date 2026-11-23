@@ -7,16 +7,32 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import { SessionAuthenticationError, SessionService, getTodayDateIST } from '../../application/SessionService.js';
+import {
+  IndexResolutionError,
+  SessionAuthenticationError,
+  SessionService,
+  getTodayDateIST,
+} from '../../application/SessionService.js';
 import type { OrderManager } from '../../application/OrderManager.js';
 import type { ReconcilerService } from '../../application/ReconcilerService.js';
 import type { RatchetLadderEngine } from '../../domain/engines/RatchetLadderEngine.js';
 import type { SqliteStateStore } from '../persistence/SqliteStateStore.js';
 import type { BrokerPort } from '../../domain/ports/BrokerPort.js';
-import type { FlattradeWsAdapter } from '../broker/FlattradeWsAdapter.js';
-import { FlattradeOAuthError } from '../broker/FlattradeRestAdapter.js';
+import {
+  MarketDataWaitError,
+  type FlattradeWsAdapter,
+} from '../broker/FlattradeWsAdapter.js';
+import {
+  FlattradeContractMasterError,
+  FlattradeOAuthError,
+} from '../broker/FlattradeRestAdapter.js';
+import type {
+  FlattradeDerivativesExchange,
+  FlattradeIndexOptionContract,
+} from '../broker/FlattradeProtocol.js';
 import type { ClientWsHub, MarketDataSelection } from './ClientWsHub.js';
 import { roundDownToTick, roundUpToTick } from '../../domain/models/Money.js';
+import type { Tick } from '../../domain/models/Tick.js';
 
 export interface HttpServerConfig {
   tradingEnabled: boolean;
@@ -72,46 +88,22 @@ export const OptionChainQuerySchema = z.object({
   symbol: z.string().default('SENSEX'),
   exchange: z.string().optional(),
   expiry: z.string().optional(),
-  strikes: z.coerce.number().int().positive().default(10),
+  strikes: z.coerce.number().int().positive().max(25).default(10),
 });
 
-function parseContractExpiry(tsym: string): string | null {
-  const match = tsym.match(/(\d{1,2})[\s-]*([A-Z]{3})[\s-]*(\d{2}|\d{4})(?=[\s-]*\d*(?:CE|PE|C|P)$)/i);
-  if (!match) return null;
-  const day = Number(match[1]);
-  const monthName = match[2]!.toUpperCase();
-  const yearText = match[3]!;
-  const year = yearText.length === 2 ? 2000 + Number(yearText) : Number(yearText);
-  const months: Record<string, number> = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
-  const month = months[monthName];
-  if (month === undefined) return null;
-  const candidate = new Date(Date.UTC(year, month, day));
-  if (candidate.getUTCFullYear() !== year || candidate.getUTCMonth() !== month || candidate.getUTCDate() !== day) return null;
-  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
+const INDEX_OPTION_UNDERLYINGS: Record<string, { exchange: FlattradeDerivativesExchange; symbol: string }> = {
+  NIFTY: { exchange: 'NFO', symbol: 'NIFTY' },
+  'NIFTY 50': { exchange: 'NFO', symbol: 'NIFTY' },
+  SENSEX: { exchange: 'BFO', symbol: 'SENSEX' },
+  BANKNIFTY: { exchange: 'NFO', symbol: 'BANKNIFTY' },
+  'NIFTY BANK': { exchange: 'NFO', symbol: 'BANKNIFTY' },
+};
 
-function parseContractStrike(tsym: string): number | null {
-  const match = tsym.match(/(?:\d{1,2}[\s-]*[A-Z]{3}[\s-]*(?:\d{2}|\d{4})[\s-]*)(\d+(?:\.\d+)?)[\s-]*(?:CE|PE|C|P)$/i);
-  if (!match) return null;
-  const strike = Number(match[1]);
-  return Number.isFinite(strike) ? strike : null;
-}
-
-function normalizeContractExpiry(value: unknown, tradingSymbol: string): string | null {
-  if (typeof value === 'string') {
-    const text = value.trim().toUpperCase();
-    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
-    if (iso) {
-      const parsed = new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])));
-      if (parsed.toISOString().slice(0, 10) === text) return text;
-    }
-    const dateMatch = /^(\d{1,2})[\s-]*([A-Z]{3})[\s-]*(\d{2}|\d{4})$/.exec(text);
-    if (dateMatch) {
-      const year = dateMatch[3]!.length === 2 ? `20${dateMatch[3]}` : dateMatch[3]!;
-      return parseContractExpiry(`${dateMatch[1]}${dateMatch[2]}${year}CE`);
-    }
-  }
-  return parseContractExpiry(tradingSymbol);
+function isValidIsoDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return date.toISOString().slice(0, 10) === value;
 }
 
 interface ResolvedOptionContract {
@@ -259,7 +251,7 @@ export class HttpServer {
 
     return {
       instrumentMaster: this.optionChainResolution.status === 'RESOLVED'
-        ? 'FLATTRADE_GETOPTIONCHAIN'
+        ? 'FLATTRADE_SCRIP_MASTER'
         : this.optionChainResolution.status,
       spot,
       spotResolutionFailure,
@@ -310,7 +302,7 @@ export class HttpServer {
         }
       }
 
-      if (market.instrumentMaster !== 'FLATTRADE_GETOPTIONCHAIN') {
+      if (market.instrumentMaster !== 'FLATTRADE_SCRIP_MASTER') {
         issues.push(this.optionChainResolution.reason ?? 'Flattrade option contracts have not been resolved.');
       }
       if (market.spot !== 'READY') {
@@ -520,71 +512,13 @@ export class HttpServer {
       };
     });
 
-    this.app.get('/api/market-data/sensex', async (_request, reply) => {
-      let instrumentId: string;
-      try {
-        instrumentId = await this.sessionService.getSensexSpotInstrumentId();
-        await this.config.flattradeWsFeed?.subscribe([instrumentId]);
-      } catch (error) {
-        reply.code(503);
-        return {
-          index: 'SENSEX',
-          exchange: 'BSE',
-          status: 'INSTRUMENT_UNAVAILABLE',
-          spotLtpPaise: null,
-          timestamp: null,
-          error: error instanceof Error ? error.message : 'Flattrade SENSEX index resolution failed.',
-        };
-      }
-      const tick = this.config.flattradeWsFeed?.getLatestTick(instrumentId) ?? null;
-      const ageMs = tick ? Math.max(0, Date.now() - tick.timestamp) : null;
-      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000 &&
-        !!this.config.flattradeWsFeed?.isAuthenticatedConnection();
-      return {
-        index: 'SENSEX',
-        exchange: 'BSE',
-        token: instrumentId.split('|')[1],
-        status: fresh ? 'READY' : tick ? 'STALE' : 'WAITING_FOR_TICK',
-        spotLtpPaise: fresh ? tick!.ltpPaise : null,
-        timestamp: fresh ? tick!.timestamp : null,
-        ageMs,
-        marketDataReady: fresh && !!this.config.flattradeWsFeed?.isAuthenticatedConnection(),
-        validation: 'TOKEN_FROM_FLATTRADE_GETINDEXLIST',
-      };
-    });
+    this.app.get('/api/market-data/sensex', async (request, reply) =>
+      this.getIndexMarketData('SENSEX', request, reply)
+    );
 
     this.app.get('/api/market-data/index', async (request, reply) => {
-      const symbol = String((request.query as Record<string, unknown>).symbol ?? 'SENSEX').toUpperCase();
-      let instrumentId: string;
-      try {
-        instrumentId = await this.sessionService.getIndexSpotInstrumentId(symbol);
-        await this.config.flattradeWsFeed?.subscribe([instrumentId]);
-      } catch (error) {
-        reply.code(503);
-        return {
-          index: symbol,
-          exchange: symbol === 'SENSEX' ? 'BSE' : 'NSE',
-          status: 'INSTRUMENT_UNAVAILABLE',
-          spotLtpPaise: null,
-          timestamp: null,
-          marketDataReady: false,
-        };
-      }
-      const tick = this.config.flattradeWsFeed?.getLatestTick(instrumentId) ?? null;
-      const ageMs = tick ? Math.max(0, Date.now() - tick.timestamp) : null;
-      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000 &&
-        !!this.config.flattradeWsFeed?.isAuthenticatedConnection();
-      return {
-        index: symbol,
-        exchange: symbol === 'SENSEX' ? 'BSE' : 'NSE',
-        token: instrumentId.split('|')[1],
-        status: fresh ? 'READY' : tick ? 'STALE' : 'WAITING_FOR_TICK',
-        spotLtpPaise: fresh ? tick!.ltpPaise : null,
-        timestamp: fresh ? tick!.timestamp : null,
-        ageMs,
-        marketDataReady: fresh && !!this.config.flattradeWsFeed?.isAuthenticatedConnection(),
-        validation: 'TOKEN_FROM_FLATTRADE_GETINDEXLIST',
-      };
+      const symbol = String((request.query as Record<string, unknown>).symbol ?? 'SENSEX').trim().toUpperCase();
+      return this.getIndexMarketData(symbol, request, reply);
     });
 
     // Option Chain (Supports SENSEX/BFO and NIFTY/NFO)
@@ -595,124 +529,151 @@ export class HttpServer {
         return;
       }
 
-      const symbol = parsed.data.symbol.toUpperCase();
-      const exch = parsed.data.exchange ?? (symbol === 'SENSEX' || symbol === 'BANKEX' ? 'BFO' : 'NFO');
-      const fail = (statusCode: number, message: string) => {
+      const symbol = parsed.data.symbol.trim().toUpperCase().replace(/\s+/g, ' ');
+      const fail = (statusCode: number, code: string, message: string, clearSelection = true) => {
         this.optionChainResolution = { status: 'FAILED', reason: message };
-        this.optionContracts.clear();
-        this.marketDataSelection = null;
-        this.wsHub?.setMarketDataSelection(null);
+        if (clearSelection) {
+          this.optionContracts.clear();
+          this.marketDataSelection = null;
+          this.wsHub?.setMarketDataSelection(null);
+        }
         reply.code(statusCode);
-        return { error: message };
+        return { symbol, status: 'UNAVAILABLE', marketDataReady: false, error: { code, message } };
       };
+
+      const underlying = INDEX_OPTION_UNDERLYINGS[symbol];
+      if (!underlying) {
+        return fail(400, 'UNSUPPORTED_INDEX', 'No Flattrade index contract source is configured for this symbol.');
+      }
+      const requestedExchange = parsed.data.exchange?.trim().toUpperCase();
+      if (requestedExchange && requestedExchange !== underlying.exchange) {
+        return fail(400, 'EXCHANGE_MISMATCH', 'The requested derivatives exchange does not match this index.');
+      }
+      const exch = underlying.exchange;
 
       let spotInstrumentId: string;
       try {
         spotInstrumentId = await this.sessionService.getIndexSpotInstrumentId(symbol);
-        if (!this.config.flattradeWsFeed) {
-          return fail(503, 'Flattrade market WebSocket feed is not configured.');
-        }
-        await this.config.flattradeWsFeed.subscribe([spotInstrumentId]);
       } catch (error) {
-        return fail(503, `Flattrade ${symbol} index token resolution failed: ${error instanceof Error ? error.message : 'unknown failure'}`);
+        const failure = this.indexResolutionFailure(error);
+        request.log.warn({ requestId: request.id, index: symbol, code: failure.code }, 'Market-data index resolution failed');
+        return fail(failure.statusCode, failure.code, failure.message);
       }
 
-      const spotTick = this.config.flattradeWsFeed?.getLatestTick(spotInstrumentId) ?? null;
-      const spotAgeMs = spotTick ? Date.now() - spotTick.timestamp : null;
-      if (!spotTick || spotAgeMs === null || spotAgeMs > 3000 || !spotTick.ltpPaise) {
-        return fail(503, `Fresh ${symbol} spot tick is unavailable${spotTick ? ' (stale)' : ' (waiting for first tick)'}.`);
-      }
-
-      const spotRupees = (spotTick.ltpPaise / 100).toFixed(2);
-      let rawChain: unknown;
+      let spotTick: Tick;
       try {
-        if (!this.broker.getOptionChain) {
-          return fail(503, 'Broker adapter does not implement Flattrade GetOptionChain.');
-        }
-        rawChain = await this.broker.getOptionChain(exch, symbol, spotRupees, parsed.data.strikes);
+        spotTick = await this.subscribeAndWaitForTick(spotInstrumentId);
       } catch (error) {
-        return fail(502, `Flattrade GetOptionChain request failed: ${error instanceof Error ? error.message : 'unknown failure'}`);
-      }
-      if (!rawChain || typeof rawChain !== 'object') {
-        return fail(503, 'Flattrade GetOptionChain returned no contract response.');
-      }
-      const chain = rawChain as { stat?: string; values?: unknown[]; emsg?: string };
-      if (chain.stat !== 'Ok' || !Array.isArray(chain.values)) {
-        return fail(503, `Flattrade GetOptionChain returned ${chain.stat ?? 'an invalid response'}; verify broker session, exchange and underlying symbol.`);
+        const failure = this.marketDataWaitFailure(error);
+        request.log.warn({ requestId: request.id, index: symbol, code: failure.code }, 'Initial spot tick unavailable');
+        return fail(failure.statusCode, failure.code, failure.message);
       }
 
-      const contracts: ResolvedOptionContract[] = chain.values.flatMap((value) => {
-        if (!value || typeof value !== 'object') return [];
-        const item = value as Record<string, unknown>;
-        const tsym = typeof item.tsym === 'string' ? item.tsym.trim() : '';
-        const token = typeof item.token === 'string'
-          ? item.token.trim()
-          : typeof item.token === 'number' && Number.isSafeInteger(item.token) && item.token > 0
-            ? String(item.token)
-            : '';
-        const expiry = normalizeContractExpiry(item.exd, tsym);
-        const parsedStrike = typeof item.strprc === 'string' || typeof item.strprc === 'number'
-          ? Number(item.strprc)
-          : parseContractStrike(tsym);
-          const strike = typeof parsedStrike === 'number' && Number.isFinite(parsedStrike) ? parsedStrike : null;
-        const optionCode = typeof item.optt === 'string' ? item.optt.trim().toUpperCase() : '';
-        const optionType = optionCode === 'CE' || optionCode === 'C'
-          ? 'CE'
-          : optionCode === 'PE' || optionCode === 'P'
-            ? 'PE'
-            : tsym.endsWith('CE') || tsym.endsWith('C')
-              ? 'CE'
-              : tsym.endsWith('PE') || tsym.endsWith('P')
-                ? 'PE'
-                : null;
-        const lotSizeRaw = typeof item.ls === 'string' || typeof item.ls === 'number' ? Number(item.ls) : NaN;
-        const lotSize = Number.isSafeInteger(lotSizeRaw) && lotSizeRaw > 0 ? lotSizeRaw : null;
-        if (!tsym || !token || !expiry || strike === null || strike <= 0 || !optionType) return [];
-        return [{ symbol: tsym, token, exchange: exch, expiry, strike, optionType, lotSize }];
-      });
+      let rawContracts: FlattradeIndexOptionContract[];
+      try {
+        rawContracts = await this.broker.getIndexOptionContracts(exch, underlying.symbol);
+      } catch (error) {
+        const code = error instanceof FlattradeContractMasterError ? error.code : 'CONTRACT_MASTER_UNAVAILABLE';
+        const statusCode = code === 'CONTRACT_MASTER_UNAVAILABLE' ? 503 : 502;
+        request.log.warn({ requestId: request.id, index: symbol, exchange: exch, code }, 'Flattrade index contract resolution failed');
+        return fail(statusCode, code, error instanceof FlattradeContractMasterError
+          ? error.message
+          : 'Flattrade index contract resolution failed.');
+      }
+      if (!Array.isArray(rawContracts) || rawContracts.some((contract) =>
+        contract.exchange !== exch ||
+        contract.underlyingSymbol !== underlying.symbol ||
+        !/^[1-9]\d*$/.test(contract.token) ||
+        !contract.symbol.trim() ||
+        !isValidIsoDate(contract.expiry) ||
+        !Number.isFinite(contract.strike) ||
+        contract.strike <= 0 ||
+        (contract.optionType !== 'CE' && contract.optionType !== 'PE') ||
+        !Number.isSafeInteger(contract.lotSize) ||
+        contract.lotSize <= 0
+      )) {
+        return fail(502, 'INVALID_CONTRACT_MASTER', 'Flattrade returned invalid index option contract metadata.');
+      }
 
+      const contracts: ResolvedOptionContract[] = rawContracts.map((contract) => ({
+        token: contract.token,
+        symbol: contract.symbol,
+        exchange: contract.exchange,
+        expiry: contract.expiry,
+        strike: contract.strike,
+        optionType: contract.optionType,
+        lotSize: contract.lotSize,
+      }));
       if (!contracts.length) {
-        return fail(503, 'Flattrade GetOptionChain returned no contracts with valid symbol, token, expiry, strike and option side fields.');
+        return fail(503, 'OPTION_CONTRACTS_NOT_FOUND', 'No Flattrade index option contracts were found for this underlying.');
       }
       const today = getTodayDateIST();
-      const expiries = [...new Set(contracts.map((contract) => contract.expiry))]
-        .filter((expiry) => expiry >= today)
-        .sort();
-      if (!expiries.length) {
-        return fail(503, 'Flattrade GetOptionChain returned no contracts with a valid future expiry.');
-      }
-      const selectedExpiry = parsed.data.expiry && expiries.includes(parsed.data.expiry)
-        ? parsed.data.expiry
-        : expiries[0]!;
-      const selectedContracts = contracts.filter((contract) => contract.expiry === selectedExpiry);
-      const contractsByStrike = new Map<number, { call?: ResolvedOptionContract; put?: ResolvedOptionContract }>();
-      for (const contract of selectedContracts) {
-        const pair = contractsByStrike.get(contract.strike) ?? {};
+      const pairsByExpiry = new Map<string, Map<number, { call?: ResolvedOptionContract; put?: ResolvedOptionContract }>>();
+      for (const contract of contracts.filter((item) => item.expiry >= today)) {
+        const byStrike = pairsByExpiry.get(contract.expiry) ?? new Map();
+        const pair = byStrike.get(contract.strike) ?? {};
+        const existing = contract.optionType === 'CE' ? pair.call : pair.put;
+        if (existing && (existing.token !== contract.token || existing.symbol !== contract.symbol)) {
+          return fail(502, 'AMBIGUOUS_OPTION_CONTRACT', 'Flattrade returned duplicate contracts for the same expiry, strike and option type.');
+        }
         if (contract.optionType === 'CE') pair.call = contract;
         else pair.put = contract;
-        contractsByStrike.set(contract.strike, pair);
+        byStrike.set(contract.strike, pair);
+        pairsByExpiry.set(contract.expiry, byStrike);
       }
+      const expiries = [...pairsByExpiry.entries()]
+        .filter(([, pairs]) => [...pairs.values()].some((pair) => pair.call && pair.put))
+        .map(([expiry]) => expiry)
+        .sort();
+      if (!expiries.length) {
+        return fail(503, 'NO_VALID_EXPIRY', 'Flattrade has no future expiry with a complete CE/PE contract pair.');
+      }
+      if (parsed.data.expiry && !expiries.includes(parsed.data.expiry)) {
+        return fail(422, 'EXPIRY_UNAVAILABLE', 'The requested expiry is not available in Flattrade current contract master.');
+      }
+      const selectedExpiry = parsed.data.expiry ?? expiries[0]!;
+      const contractsByStrike = pairsByExpiry.get(selectedExpiry)!;
       const pairedStrikes = [...contractsByStrike.entries()]
         .filter(([, pair]) => pair.call && pair.put)
         .map(([strike]) => strike)
         .sort((a, b) => a - b);
       if (!pairedStrikes.length) {
-        return fail(503, `Flattrade returned no complete CE/PE pair for selected expiry ${selectedExpiry}.`);
+        return fail(503, 'CONTRACT_PAIR_NOT_FOUND', 'Flattrade returned no complete CE/PE pair for the selected expiry.');
       }
       const spotRupeesNumber = spotTick.ltpPaise / 100;
       const atmStrike = pairedStrikes.reduce<number>((nearest, strike) =>
         Math.abs(strike - spotRupeesNumber) < Math.abs(nearest - spotRupeesNumber) ? strike : nearest
       , pairedStrikes[0]!);
+      const atmIndex = pairedStrikes.indexOf(atmStrike);
+      const visibleStrikes = pairedStrikes.slice(
+        Math.max(0, atmIndex - parsed.data.strikes),
+        Math.min(pairedStrikes.length, atmIndex + parsed.data.strikes + 1)
+      );
+      const selectedContracts = visibleStrikes.flatMap((strike) => {
+        const pair = contractsByStrike.get(strike)!;
+        return [pair.call!, pair.put!];
+      });
 
       const optionIds = selectedContracts.map((contract) => `${exch}|${contract.token}`);
       const oldOptionIds = [...this.optionContracts.keys()];
-
-      if (optionIds.length) {
-        await this.config.flattradeWsFeed.subscribe(optionIds);
+      const marketFeed = this.config.flattradeWsFeed;
+      if (!marketFeed) {
+        return fail(503, 'WEBSOCKET_NOT_CONNECTED', 'Flattrade market WebSocket feed is not configured.');
       }
+
       const nextContracts = new Map(selectedContracts.map((contract) => [`${exch}|${contract.token}`, contract]));
       const removedIds = oldOptionIds.filter((instrumentId) => !nextContracts.has(instrumentId));
-      if (removedIds.length) await this.config.flattradeWsFeed.unsubscribe(removedIds);
+      try {
+        if (optionIds.length) await marketFeed.subscribe(optionIds);
+        if (removedIds.length) await marketFeed.unsubscribe(removedIds);
+      } catch (error) {
+        const failure = this.marketDataWaitFailure(error);
+        request.log.warn(
+          { requestId: request.id, index: symbol, expiry: selectedExpiry, code: failure.code },
+          'Flattrade option subscription failed'
+        );
+        return fail(failure.statusCode, failure.code, failure.message);
+      }
       this.optionContracts.clear();
       for (const [instrumentId, contract] of nextContracts) this.optionContracts.set(instrumentId, contract);
 
@@ -724,7 +685,7 @@ export class HttpServer {
         atmStrike,
         call: { token: atmPair.call!.token, symbol: atmPair.call!.symbol, exchange: exch, lotSize: atmPair.call!.lotSize },
         put: { token: atmPair.put!.token, symbol: atmPair.put!.symbol, exchange: exch, lotSize: atmPair.put!.lotSize },
-        strikes: pairedStrikes.map((strike) => {
+        strikes: visibleStrikes.map((strike) => {
           const pair = contractsByStrike.get(strike)!;
           return {
             strikePrice: strike,
@@ -736,6 +697,17 @@ export class HttpServer {
       this.marketDataSelection = selection;
       this.optionChainResolution = { status: 'RESOLVED', reason: null };
       this.wsHub?.setMarketDataSelection(selection);
+
+      try {
+        await Promise.all([
+          this.subscribeAndWaitForTick(`${exch}|${atmPair.call!.token}`),
+          this.subscribeAndWaitForTick(`${exch}|${atmPair.put!.token}`),
+        ]);
+      } catch (error) {
+        const failure = this.marketDataWaitFailure(error);
+        request.log.warn({ requestId: request.id, index: symbol, expiry: selectedExpiry, code: failure.code }, 'Initial option tick unavailable');
+        return fail(failure.statusCode, failure.code, failure.message, false);
+      }
 
       const strikeDtos = selection.strikes.map((strike) => {
         const freshTick = (contract: { token: string } | null) => {
@@ -771,9 +743,9 @@ export class HttpServer {
         expiries,
         strikes: strikeDtos,
         atmStrike,
-        dataSource: 'FLATTRADE_GETOPTIONCHAIN',
+        dataSource: 'FLATTRADE_SCRIP_MASTER',
         marketDataReady: market.marketDataReady,
-        validation: 'CONTRACTS_FROM_FLATTRADE_GETOPTIONCHAIN_AND_FRESH_WEBSOCKET_TICKS',
+        validation: 'CONTRACTS_FROM_FLATTRADE_INDEX_SCRIP_MASTER_AND_FRESH_WEBSOCKET_TICKS',
       };
     });
 
@@ -934,6 +906,146 @@ export class HttpServer {
       }
       reply.code(404).send({ error: 'Swagger specification not found' });
     });
+  }
+
+  private async getIndexMarketData(symbol: string, request: FastifyRequest, reply: FastifyReply) {
+    let instrumentId: string | null = null;
+    const exchange = symbol === 'SENSEX' ? 'BSE' : 'NSE';
+    request.log.info({ requestId: request.id, index: symbol }, 'Resolving Flattrade index instrument');
+    try {
+      instrumentId = await this.sessionService.getIndexSpotInstrumentId(symbol);
+      request.log.info(
+        { requestId: request.id, index: symbol, exchange, instrumentId },
+        'Resolved Flattrade index instrument'
+      );
+      const tick = await this.subscribeAndWaitForTick(instrumentId);
+      const ageMs = Math.max(0, Date.now() - tick.timestamp);
+      return {
+        index: symbol,
+        exchange,
+        token: instrumentId.split('|')[1],
+        status: 'READY',
+        spotLtpPaise: tick.ltpPaise,
+        timestamp: tick.timestamp,
+        ageMs,
+        marketDataReady: true,
+        validation: 'TOKEN_FROM_FLATTRADE_GETINDEXLIST',
+        error: null,
+      };
+    } catch (error) {
+      const failure = error instanceof IndexResolutionError
+        ? this.indexResolutionFailure(error)
+        : this.marketDataWaitFailure(error);
+      request.log.warn(
+        {
+          requestId: request.id,
+          index: symbol,
+          exchange,
+          instrumentId,
+          code: failure.code,
+        },
+        'Flattrade index market data is unavailable'
+      );
+      reply.code(failure.statusCode);
+      const status = failure.code === 'INDEX_NOT_FOUND' ||
+        failure.code === 'INVALID_INDEX_TOKEN' ||
+        failure.code === 'AMBIGUOUS_INDEX' ||
+        failure.code === 'INVALID_INDEX_EXCHANGE' ||
+        failure.code === 'INVALID_INDEX_RESPONSE'
+        ? 'INSTRUMENT_UNAVAILABLE'
+        : failure.code === 'INITIAL_TICK_NOT_RECEIVED'
+          ? 'WAITING_FOR_TICK'
+          : failure.code === 'STALE_MARKET_DATA'
+            ? 'STALE'
+            : failure.code === 'BROKER_SESSION_UNAVAILABLE'
+              ? 'BROKER_SESSION_UNAVAILABLE'
+              : failure.code === 'WEBSOCKET_NOT_CONNECTED'
+                ? 'DISCONNECTED'
+                : failure.code === 'SUBSCRIPTION_REJECTED'
+                  ? 'SUBSCRIPTION_REJECTED'
+                  : 'BROKER_API_FAILURE';
+      return {
+        index: symbol,
+        exchange,
+        token: instrumentId?.split('|')[1] ?? null,
+        status,
+        spotLtpPaise: null,
+        timestamp: null,
+        marketDataReady: false,
+        error: { code: failure.code, message: failure.message },
+      };
+    }
+  }
+
+  private async subscribeAndWaitForTick(instrumentId: string): Promise<Tick> {
+    const feed = this.config.flattradeWsFeed;
+    if (!feed) {
+      throw new MarketDataWaitError('WEBSOCKET_NOT_CONNECTED', 'Flattrade market WebSocket feed is not configured.');
+    }
+    await feed.subscribe([instrumentId]);
+    const cachedTick = feed.getLatestTick(instrumentId);
+    const maxAgeMs = 3_000;
+    const freshCachedTick = cachedTick !== null &&
+      Date.now() - cachedTick.timestamp <= maxAgeMs &&
+      cachedTick.ltpPaise > 0 &&
+      feed.isAuthenticatedConnection();
+    if (freshCachedTick) return cachedTick;
+
+    if (!feed.isAuthenticatedConnection() && feed.getConnectionState() === 'DISCONNECTED') {
+      throw new MarketDataWaitError(
+        'WEBSOCKET_NOT_CONNECTED',
+        'Flattrade market-data WebSocket is not authenticated.'
+      );
+    }
+    const tick = await feed.waitForTick(instrumentId);
+    if (tick.ltpPaise <= 0 || Date.now() - tick.timestamp > maxAgeMs) {
+      throw new MarketDataWaitError('STALE_MARKET_DATA', 'Flattrade market-data tick is stale.');
+    }
+    if (!feed.isAuthenticatedConnection()) {
+      throw new MarketDataWaitError(
+        'WEBSOCKET_NOT_CONNECTED',
+        'Flattrade market-data WebSocket disconnected before the tick arrived.'
+      );
+    }
+    return tick;
+  }
+
+  private indexResolutionFailure(error: unknown): {
+    code: string;
+    message: string;
+    statusCode: number;
+  } {
+    if (!(error instanceof IndexResolutionError)) {
+      return {
+        code: 'BROKER_API_FAILURE',
+        message: 'Flattrade index-list request failed.',
+        statusCode: 502,
+      };
+    }
+    const statusCode = error.code === 'UNSUPPORTED_INDEX'
+      ? 400
+      : error.code === 'INDEX_NOT_FOUND'
+        ? 404
+        : error.code === 'BROKER_API_FAILURE' || error.code === 'INVALID_INDEX_RESPONSE'
+          ? 502
+          : 503;
+    return { code: error.code, message: error.message, statusCode };
+  }
+
+  private marketDataWaitFailure(error: unknown): {
+    code: string;
+    message: string;
+    statusCode: number;
+  } {
+    if (error instanceof MarketDataWaitError) {
+      const statusCode = error.code === 'SUBSCRIPTION_REJECTED' ? 502 : 503;
+      return { code: error.code, message: error.message, statusCode };
+    }
+    return {
+      code: 'BROKER_API_FAILURE',
+      message: 'Flattrade market-data request failed.',
+      statusCode: 502,
+    };
   }
 
   async listen(port: number, host = '127.0.0.1'): Promise<string> {

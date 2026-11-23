@@ -11,11 +11,33 @@ export interface FlattradeWsConfig {
   sessionToken: string;
   watchdogIntervalMs?: number;
   staleTimeoutMs?: number;
+  initialTickTimeoutMs?: number;
   marketHoursOverride?: boolean | null;
 }
 
 export type FeedStatusListener = (status: 'CONNECTED' | 'DISCONNECTED' | 'FEED_STALE' | 'RECONNECTING') => void;
 export type OrderUpdateListener = (update: OrderUpdateEvent) => void;
+
+export type MarketDataWaitErrorCode =
+  | 'BROKER_SESSION_UNAVAILABLE'
+  | 'WEBSOCKET_NOT_CONNECTED'
+  | 'SUBSCRIPTION_REJECTED'
+  | 'INITIAL_TICK_NOT_RECEIVED'
+  | 'STALE_MARKET_DATA'
+  | 'SUBSCRIPTION_CANCELLED';
+
+export class MarketDataWaitError extends Error {
+  constructor(readonly code: MarketDataWaitErrorCode, message: string) {
+    super(message);
+    this.name = 'MarketDataWaitError';
+  }
+}
+
+interface TickWaiter {
+  resolve: (tick: Tick) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
 
 /**
  * Checks whether current time falls within NSE regular market trading hours (09:15 - 15:30 IST, Mon-Fri).
@@ -53,9 +75,11 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   private ws: WebSocket | null = null;
   private isAuthenticated = false;
   private isDestroyed = false;
+  private authenticationRejected = false;
 
   private readonly subscribedTokens = new Set<string>();
   private readonly subscriptionStartedAt = new Map<string, number>();
+  private readonly tickWaiters = new Map<string, Set<TickWaiter>>();
   private tickCallback: ((tick: Tick) => void) | null = null;
   private readonly statusListeners: FeedStatusListener[] = [];
   private readonly orderUpdateListeners: OrderUpdateListener[] = [];
@@ -89,6 +113,9 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   }
 
   setSessionToken(token: string): void {
+    if (this.config.sessionToken !== token) {
+      this.authenticationRejected = false;
+    }
     this.config.sessionToken = token;
   }
 
@@ -156,6 +183,10 @@ export class FlattradeWsAdapter implements MarketFeedPort {
           this.lastTickTimestamp = 0;
           this.lastTickByToken.clear();
           this.latestTickByToken.clear();
+          this.rejectAllTickWaiters(new MarketDataWaitError(
+            'WEBSOCKET_NOT_CONNECTED',
+            'Flattrade market-data WebSocket disconnected before the tick arrived.'
+          ));
           clearTimeout(timeout);
           this.connectionReject?.(new Error('Flattrade WebSocket disconnected before authentication completed'));
           this.connectionReject = null;
@@ -192,17 +223,24 @@ export class FlattradeWsAdapter implements MarketFeedPort {
       const msg = JSON.parse(data.toString());
 
       // 1. Connection acknowledgement
-      if (msg.t === 'ck' && msg.s === 'OK') {
+      if (msg.t === 'ak' && String(msg.s).toUpperCase() === 'OK') {
         this.isAuthenticated = true;
+        this.authenticationRejected = false;
         this.lastTickTimestamp = 0;
         this.emitStatus('CONNECTED');
         this.resubscribeAll();
         return;
       }
 
-      if (msg.t === 'ck' && msg.s !== 'OK') {
+      if (msg.t === 'ak') {
         this.isAuthenticated = false;
-        this.connectionReject?.(new Error('Flattrade rejected WebSocket authentication'));
+        this.authenticationRejected = true;
+        const error = new MarketDataWaitError(
+          'BROKER_SESSION_UNAVAILABLE',
+          'Flattrade rejected WebSocket authentication.'
+        );
+        this.rejectAllTickWaiters(error);
+        this.connectionReject?.(error);
         this.connectionReject = null;
         this.ws?.close(4001, 'Broker WebSocket authentication rejected');
         return;
@@ -210,24 +248,40 @@ export class FlattradeWsAdapter implements MarketFeedPort {
 
       // 2. Touchline ticks
       if (msg.t === 'tk' || msg.t === 'tf') {
-        if (msg.e && msg.tk && msg.lp) {
+        const status = typeof msg.s === 'string' ? msg.s.toUpperCase() : '';
+        if (status && status !== 'OK') {
+          if (msg.e && msg.tk) {
+            this.rejectTickWaiters(
+              `${String(msg.e).toUpperCase()}|${String(msg.tk)}`,
+              new MarketDataWaitError('SUBSCRIPTION_REJECTED', 'Flattrade rejected the market-data subscription.')
+            );
+          }
+          return;
+        }
+        if (msg.e && msg.tk && msg.lp !== undefined && msg.lp !== null) {
           const instrumentId = `${String(msg.e).toUpperCase()}|${String(msg.tk)}`;
           if (!this.subscribedTokens.has(instrumentId)) return;
-          const receivedAt = Date.now();
-          this.lastTickTimestamp = receivedAt;
-          this.lastTickByToken.set(instrumentId, receivedAt);
-          const ltpPaise = toPaise(msg.lp);
-          const tick: Tick = {
-            token: String(msg.tk),
-            exchange: String(msg.e).toUpperCase(),
-            ltpPaise,
-            bestBidPaise: msg.bp1 ? toPaise(msg.bp1) : undefined,
-            bestAskPaise: msg.sp1 ? toPaise(msg.sp1) : undefined,
-            volume: msg.v ? parseInt(String(msg.v), 10) : undefined,
-            timestamp: Date.now(),
-          };
-          this.latestTickByToken.set(instrumentId, tick);
-          this.tickCallback?.(tick);
+          try {
+            const ltpPaise = toPaise(msg.lp);
+            if (ltpPaise <= 0) return;
+            const receivedAt = Date.now();
+            this.lastTickTimestamp = receivedAt;
+            this.lastTickByToken.set(instrumentId, receivedAt);
+            const tick: Tick = {
+              token: String(msg.tk),
+              exchange: String(msg.e).toUpperCase(),
+              ltpPaise,
+              bestBidPaise: msg.bp1 ? toPaise(msg.bp1) : undefined,
+              bestAskPaise: msg.sp1 ? toPaise(msg.sp1) : undefined,
+              volume: msg.v ? parseInt(String(msg.v), 10) : undefined,
+              timestamp: receivedAt,
+            };
+            this.latestTickByToken.set(instrumentId, tick);
+            this.tickCallback?.(tick);
+            this.resolveTickWaiters(instrumentId, tick);
+          } catch {
+            console.warn('Flattrade WebSocket ignored an invalid market tick', { instrumentId });
+          }
         }
         return;
       }
@@ -247,23 +301,28 @@ export class FlattradeWsAdapter implements MarketFeedPort {
         return;
       }
     } catch {
-      // Ignore unparseable raw packets
+      console.warn('Flattrade WebSocket ignored an unparseable message');
     }
   }
 
   async subscribe(tokens: string[]): Promise<void> {
-    const instrumentIds = this.normalizeInstrumentIds(tokens);
+    const instrumentIds = [...new Set(this.normalizeInstrumentIds(tokens))];
+    if (this.authenticationRejected) {
+      throw new MarketDataWaitError(
+        'BROKER_SESSION_UNAVAILABLE',
+        'Flattrade rejected the current WebSocket session.'
+      );
+    }
+    const newlySubscribed = instrumentIds.filter((id) => !this.subscribedTokens.has(id));
+    if (newlySubscribed.length === 0) return;
     const now = Date.now();
-    for (const id of instrumentIds) {
+    for (const id of newlySubscribed) {
       this.subscribedTokens.add(id);
       this.subscriptionStartedAt.set(id, now);
     }
 
     if (this.isAuthenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      for (const id of instrumentIds) this.lastTickByToken.delete(id);
-      for (const id of instrumentIds) this.latestTickByToken.delete(id);
-      this.lastTickTimestamp = 0;
-      const keyStr = instrumentIds.join('#');
+      const keyStr = newlySubscribed.join('#');
       this.send({ t: 't', k: keyStr });
     }
   }
@@ -275,6 +334,10 @@ export class FlattradeWsAdapter implements MarketFeedPort {
       this.lastTickByToken.delete(id);
       this.latestTickByToken.delete(id);
       this.subscriptionStartedAt.delete(id);
+      this.rejectTickWaiters(
+        id,
+        new MarketDataWaitError('SUBSCRIPTION_CANCELLED', 'Market-data subscription was cancelled.')
+      );
     }
     if (this.isAuthenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
       const keyStr = instrumentIds.join('#');
@@ -284,6 +347,77 @@ export class FlattradeWsAdapter implements MarketFeedPort {
 
   getLatestTick(instrumentId: string): Tick | null {
     return this.latestTickByToken.get(instrumentId) ?? null;
+  }
+
+  waitForTick(instrumentId: string, timeoutMs = this.config.initialTickTimeoutMs ?? 5000): Promise<Tick> {
+    const normalizedId = this.normalizeInstrumentIds([instrumentId])[0]!;
+    if (this.authenticationRejected) {
+      return Promise.reject(new MarketDataWaitError(
+        'BROKER_SESSION_UNAVAILABLE',
+        'Flattrade rejected the current WebSocket session.'
+      ));
+    }
+    const cachedTick = this.latestTickByToken.get(normalizedId);
+    const maxAgeMs = this.config.staleTimeoutMs ?? 3000;
+    if (cachedTick && Date.now() - cachedTick.timestamp <= maxAgeMs) {
+      return Promise.resolve(cachedTick);
+    }
+    if (!this.subscribedTokens.has(normalizedId)) {
+      return Promise.reject(new MarketDataWaitError(
+        'SUBSCRIPTION_REJECTED',
+        'Market-data instrument has not been subscribed.'
+      ));
+    }
+
+    return new Promise<Tick>((resolve, reject) => {
+      const waiter: TickWaiter = {
+        resolve,
+        reject,
+        timeout: setTimeout(() => {
+          this.removeTickWaiter(normalizedId, waiter);
+          reject(new MarketDataWaitError(
+            'INITIAL_TICK_NOT_RECEIVED',
+            'Timed out waiting for the first Flattrade market-data tick.'
+          ));
+        }, Math.max(1, timeoutMs)),
+      };
+      const waiters = this.tickWaiters.get(normalizedId) ?? new Set<TickWaiter>();
+      waiters.add(waiter);
+      this.tickWaiters.set(normalizedId, waiters);
+    });
+  }
+
+  private resolveTickWaiters(instrumentId: string, tick: Tick): void {
+    const waiters = this.tickWaiters.get(instrumentId);
+    if (!waiters) return;
+    this.tickWaiters.delete(instrumentId);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timeout);
+      waiter.resolve(tick);
+    }
+  }
+
+  private rejectTickWaiters(instrumentId: string, error: Error): void {
+    const waiters = this.tickWaiters.get(instrumentId);
+    if (!waiters) return;
+    this.tickWaiters.delete(instrumentId);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+  }
+
+  private removeTickWaiter(instrumentId: string, waiter: TickWaiter): void {
+    const waiters = this.tickWaiters.get(instrumentId);
+    if (!waiters) return;
+    waiters.delete(waiter);
+    if (waiters.size === 0) this.tickWaiters.delete(instrumentId);
+  }
+
+  private rejectAllTickWaiters(error: Error): void {
+    for (const instrumentId of this.tickWaiters.keys()) {
+      this.rejectTickWaiters(instrumentId, error);
+    }
   }
 
   private resubscribeAll(): void {
@@ -347,7 +481,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
   }
 
   private scheduleReconnect(): void {
-    if (this.isDestroyed || this.reconnectTimer) return;
+    if (this.isDestroyed || this.authenticationRejected || this.reconnectTimer) return;
 
     // Exponential backoff: 500ms -> 1s -> 2s -> 5s max
     const backoffDelays = [500, 1000, 2000, 5000];
@@ -412,5 +546,10 @@ export class FlattradeWsAdapter implements MarketFeedPort {
     this.subscribedTokens.clear();
     this.subscriptionStartedAt.clear();
     this.lastTickByToken.clear();
+    this.latestTickByToken.clear();
+    this.rejectAllTickWaiters(new MarketDataWaitError(
+      'SUBSCRIPTION_CANCELLED',
+      'Flattrade market-data feed was stopped.'
+    ));
   }
 }

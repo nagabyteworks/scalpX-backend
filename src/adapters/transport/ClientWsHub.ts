@@ -61,6 +61,7 @@ export interface MarketDataSelection {
 
 export interface MarketDataSnapshot {
   indexSymbol: string;
+  spotExchange: string;
   spotToken: string;
   spotLtpPaise: number | null;
   spotTimestamp: number | null;
@@ -77,6 +78,7 @@ export interface MarketDataSnapshot {
   peLtpPaise: number | null;
   peTimestamp: number | null;
   marketDataTimestamp: number | null;
+  marketDataReady: boolean;
   feedStatus: 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'STALE' | 'WAITING_FOR_TICK';
   strikes: Array<{
     strikePrice: number;
@@ -101,7 +103,7 @@ export class ClientWsHub {
   private readonly latestLtpMap = new Map<string, number>();
   private readonly latestTicks = new Map<string, Tick>();
   private marketDataSelection: MarketDataSelection | null = null;
-  private feedStatus: 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' = 'DISCONNECTED';
+  private feedStatus: 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'FEED_STALE' = 'DISCONNECTED';
   private throttleTimer: NodeJS.Timeout | null = null;
 
   constructor(config: ClientWsHubConfig, engine: RatchetLadderEngine) {
@@ -150,7 +152,7 @@ export class ClientWsHub {
   }
 
   setFeedStatus(status: 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'FEED_STALE'): void {
-    this.feedStatus = status === 'FEED_STALE' ? 'CONNECTED' : status;
+    this.feedStatus = status;
   }
 
   /**
@@ -227,7 +229,9 @@ export class ClientWsHub {
     const put = readContract(selection.put);
     const allFresh = spot.ltpPaise !== null && call.ltpPaise !== null && put.ltpPaise !== null;
     const hasStaleTick = spot.hadStaleTick || call.hadStaleTick || put.hadStaleTick;
-    const feedStatus = this.feedStatus !== 'CONNECTED'
+    const feedStatus = this.feedStatus === 'FEED_STALE'
+      ? 'STALE'
+      : this.feedStatus !== 'CONNECTED'
       ? this.feedStatus
       : allFresh
         ? 'CONNECTED'
@@ -237,6 +241,7 @@ export class ClientWsHub {
 
     return {
       indexSymbol: selection.indexSymbol,
+      spotExchange: selection.spot.exchange,
       spotToken: selection.spot.token,
       spotLtpPaise: spot.ltpPaise,
       spotTimestamp: spot.timestamp,
@@ -255,6 +260,7 @@ export class ClientWsHub {
       marketDataTimestamp: allFresh
         ? Math.min(spot.timestamp!, call.timestamp!, put.timestamp!)
         : null,
+      marketDataReady: allFresh,
       feedStatus,
       strikes: selection.strikes.map((strike) => {
         const ce = strike.call ? readContract(strike.call) : null;

@@ -9,6 +9,7 @@ import { OrderManager } from '../../src/application/OrderManager.js';
 import { getTodayDateIST, SessionService } from '../../src/application/SessionService.js';
 import { ReconcilerService } from '../../src/application/ReconcilerService.js';
 import type { MarketFeedPort } from '../../src/domain/ports/MarketFeedPort.js';
+import { MarketDataWaitError } from '../../src/adapters/broker/FlattradeWsAdapter.js';
 
 describe('HttpServer Transport Layer Integration', () => {
   const JWT_SECRET = 'TEST_JWT_SECRET_KEY_123456';
@@ -397,34 +398,43 @@ describe('HttpServer Transport Layer Integration', () => {
       const contract = (expiry: string, strike: number, optionType: 'CE' | 'PE', token: string) => {
         const date = new Date(`${expiry}T00:00:00.000Z`);
         return {
+          exchange: 'BFO',
+          underlyingSymbol: 'SENSEX',
           token,
-          tsym: `SENSEX${date.getUTCDate()}${monthCodes[date.getUTCMonth()]}${String(date.getUTCFullYear()).slice(-2)}${strike}${optionType}`,
-          exd: expiry,
-          strprc: String(strike),
-          optt: optionType,
-          ls: '20',
+          symbol: `SENSEX${date.getUTCDate()}${monthCodes[date.getUTCMonth()]}${String(date.getUTCFullYear()).slice(-2)}${strike}${optionType}`,
+          expiry,
+          strike,
+          optionType,
+          lotSize: 20,
         };
       };
       const values = [
-        contract(firstExpiry, 82_000, 'CE', 'CE_82000'),
-        contract(firstExpiry, 82_000, 'PE', 'PE_82000'),
-        contract(firstExpiry, 82_100, 'CE', 'CE_82100'),
-        contract(firstExpiry, 82_100, 'PE', 'PE_82100'),
-        contract(secondExpiry, 82_000, 'CE', 'CE_NEXT_82000'),
-        contract(secondExpiry, 82_000, 'PE', 'PE_NEXT_82000'),
+        contract(firstExpiry, 82_000, 'CE', '82001'),
+        contract(firstExpiry, 82_000, 'PE', '82002'),
+        contract(firstExpiry, 82_100, 'CE', '82101'),
+        contract(firstExpiry, 82_100, 'PE', '82102'),
+        contract(secondExpiry, 82_000, 'CE', '82201'),
+        contract(secondExpiry, 82_000, 'PE', '82202'),
       ];
       const ticks = new Map([
         ['BSE|901', { token: '901', exchange: 'BSE', ltpPaise: 8_204_000, timestamp: now }],
-        ['BFO|CE_82000', { token: 'CE_82000', exchange: 'BFO', ltpPaise: 12_500, timestamp: now }],
-        ['BFO|PE_82000', { token: 'PE_82000', exchange: 'BFO', ltpPaise: 11_250, timestamp: now }],
-        ['BFO|CE_82100', { token: 'CE_82100', exchange: 'BFO', ltpPaise: 10_500, timestamp: now }],
-        ['BFO|PE_82100', { token: 'PE_82100', exchange: 'BFO', ltpPaise: 12_000, timestamp: now }],
+        ['BFO|82001', { token: '82001', exchange: 'BFO', ltpPaise: 12_500, timestamp: now }],
+        ['BFO|82002', { token: '82002', exchange: 'BFO', ltpPaise: 11_250, timestamp: now }],
+        ['BFO|82101', { token: '82101', exchange: 'BFO', ltpPaise: 10_500, timestamp: now }],
+        ['BFO|82102', { token: '82102', exchange: 'BFO', ltpPaise: 12_000, timestamp: now }],
+        ['BFO|82201', { token: '82201', exchange: 'BFO', ltpPaise: 9_500, timestamp: now }],
+        ['BFO|82202', { token: '82202', exchange: 'BFO', ltpPaise: 9_250, timestamp: now }],
       ]);
       const subscriptions: string[][] = [];
-      (broker as any).getIndexList = vi.fn(async () => [{ idxname: 'SENSEX', token: '901' }]);
-      (broker as any).getOptionChain = vi.fn(async () => ({ stat: 'Ok', values }));
+      const subscribed = new Set<string>();
+      (broker as any).getIndexList = vi.fn(async () => [{ idxname: 'SENSEX', token: '901', exchange: 'BSE' }]);
+      (broker as any).getIndexOptionContracts = vi.fn(async () => values);
       const feed = {
-        subscribe: vi.fn(async (ids: string[]) => { subscriptions.push(ids); }),
+        subscribe: vi.fn(async (ids: string[]) => {
+          const newlySubscribed = ids.filter((id) => !subscribed.has(id));
+          newlySubscribed.forEach((id) => subscribed.add(id));
+          if (newlySubscribed.length) subscriptions.push(newlySubscribed);
+        }),
         unsubscribe: vi.fn(async () => {}),
         getConnectionState: () => 'CONNECTED',
         isTransportConnected: () => true,
@@ -439,31 +449,126 @@ describe('HttpServer Transport Layer Integration', () => {
       expect(data.expiries).toEqual([firstExpiry, secondExpiry]);
       expect(data.expiry).toBe(firstExpiry);
       expect(data.atmStrike).toBe(82_000);
-      expect(data.dataSource).toBe('FLATTRADE_GETOPTIONCHAIN');
+      expect(data.dataSource).toBe('FLATTRADE_SCRIP_MASTER');
       expect(data.marketDataReady).toBe(true);
       expect(data.strikes.find((strike: any) => strike.strikePrice === 82_000)).toMatchObject({
-        ceToken: 'CE_82000',
-        ceSymbol: values[0]!.tsym,
+        ceToken: '82001',
+        ceSymbol: values[0]!.symbol,
         ceLtpPaise: 12_500,
-        peToken: 'PE_82000',
-        peSymbol: values[1]!.tsym,
+        peToken: '82002',
+        peSymbol: values[1]!.symbol,
         peLtpPaise: 11_250,
       });
       expect(subscriptions).toEqual([
         ['BSE|901'],
-        ['BFO|CE_82000', 'BFO|PE_82000', 'BFO|CE_82100', 'BFO|PE_82100'],
+        ['BFO|82001', 'BFO|82002', 'BFO|82101', 'BFO|82102'],
       ]);
+
+      const selectedExpiryResponse = await fetch(
+        `${baseUrl}/api/option-chain?symbol=SENSEX&expiry=${secondExpiry}&strikes=1`
+      );
+      expect(selectedExpiryResponse.status).toBe(200);
+      expect((await selectedExpiryResponse.json() as any).expiry).toBe(secondExpiry);
+
+      const unavailableExpiryResponse = await fetch(
+        `${baseUrl}/api/option-chain?symbol=SENSEX&expiry=1900-01-01`
+      );
+      expect(unavailableExpiryResponse.status).toBe(422);
+      expect((await unavailableExpiryResponse.json() as any).error.code).toBe('EXPIRY_UNAVAILABLE');
+
+      const wrongExchangeResponse = await fetch(
+        `${baseUrl}/api/option-chain?symbol=SENSEX&exchange=NFO`
+      );
+      expect(wrongExchangeResponse.status).toBe(400);
+      expect((await wrongExchangeResponse.json() as any).error.code).toBe('EXCHANGE_MISMATCH');
+
+      feed.subscribe.mockImplementation(async (ids: string[]) => {
+        if (ids.some((id) => id.startsWith('BFO|'))) {
+          throw new MarketDataWaitError('SUBSCRIPTION_REJECTED', 'Broker rejected the test subscription.');
+        }
+      });
+      const rejectedSubscriptionResponse = await fetch(`${baseUrl}/api/option-chain?symbol=SENSEX`);
+      expect(rejectedSubscriptionResponse.status).toBe(502);
+      expect((await rejectedSubscriptionResponse.json() as any).error.code).toBe('SUBSCRIPTION_REJECTED');
     });
 
     it('GET /api/market-data/sensex returns unavailable without a verified broker index token', async () => {
       const response = await fetch(`${baseUrl}/api/market-data/sensex`, {
         headers: { 'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}` },
       });
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(502);
       const data = await response.json() as any;
       expect(data.index).toBe('SENSEX');
-      expect(data.status).toBe('INSTRUMENT_UNAVAILABLE');
+      expect(data.status).toBe('BROKER_API_FAILURE');
+      expect(data.error.code).toBe('BROKER_API_FAILURE');
       expect(data.spotLtpPaise).toBeNull();
+    });
+
+    it('GET /api/market-data/index waits for the asynchronous first tick and returns structured readiness', async () => {
+      (broker as any).getIndexList = vi.fn(async () => [{
+        idxname: 'Nifty 50',
+        token: '26000',
+        exchange: 'NSE',
+      }]);
+      const tick = { token: '26000', exchange: 'NSE', ltpPaise: 2_250_000, timestamp: Date.now() };
+      let latestTick: typeof tick | null = null;
+      const feed = {
+        subscribe: vi.fn(async () => {}),
+        unsubscribe: vi.fn(async () => {}),
+        getLatestTick: () => latestTick,
+        waitForTick: vi.fn(async () => {
+          latestTick = tick;
+          return tick;
+        }),
+        getConnectionState: () => 'CONNECTED',
+        isAuthenticatedConnection: () => true,
+        isTransportConnected: () => true,
+        onTick: () => {},
+      };
+      (server as any).config.flattradeWsFeed = feed;
+
+      const response = await fetch(`${baseUrl}/api/market-data/index?symbol=NIFTY`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        index: 'NIFTY',
+        exchange: 'NSE',
+        token: '26000',
+        status: 'READY',
+        spotLtpPaise: 2_250_000,
+        marketDataReady: true,
+        error: null,
+      });
+      expect(feed.waitForTick).toHaveBeenCalledWith('NSE|26000');
+    });
+
+    it('GET /api/market-data/index reports a first-tick timeout without a success-shaped response', async () => {
+      (broker as any).getIndexList = vi.fn(async () => [{
+        idxname: 'Nifty 50',
+        token: '26000',
+        exchange: 'NSE',
+      }]);
+      const feed = {
+        subscribe: vi.fn(async () => {}),
+        unsubscribe: vi.fn(async () => {}),
+        getLatestTick: () => null,
+        waitForTick: vi.fn(async () => {
+          throw new MarketDataWaitError('INITIAL_TICK_NOT_RECEIVED', 'Timed out waiting for the first Flattrade market-data tick.');
+        }),
+        getConnectionState: () => 'CONNECTED',
+        isAuthenticatedConnection: () => true,
+        isTransportConnected: () => true,
+        onTick: () => {},
+      };
+      (server as any).config.flattradeWsFeed = feed;
+
+      const response = await fetch(`${baseUrl}/api/market-data/index?symbol=NIFTY`);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        status: 'WAITING_FOR_TICK',
+        spotLtpPaise: null,
+        marketDataReady: false,
+        error: { code: 'INITIAL_TICK_NOT_RECEIVED' },
+      });
     });
 
     it('GET /api/auth/status reports LIVE mode without claiming a live feed', async () => {
@@ -536,16 +641,16 @@ describe('HttpServer Transport Layer Integration', () => {
         },
       });
 
-      expect(res.status).toBe(503);
-      expect((await res.json() as any).error).toMatch(/resolution failed|spot tick/i);
+      expect(res.status).toBe(502);
+      expect((await res.json() as any).error.code).toBe('BROKER_API_FAILURE');
     });
 
     it('LIVE SENSEX chain fails closed without authoritative instrument and fresh spot data', async () => {
       const res = await fetch(`${baseUrl}/api/option-chain?symbol=SENSEX&strikes=5`, {
         headers: { 'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}` },
       });
-      expect(res.status).toBe(503);
-      expect((await res.json() as any).error).toMatch(/resolution failed|spot tick/i);
+      expect(res.status).toBe(502);
+      expect((await res.json() as any).error.code).toBe('BROKER_API_FAILURE');
     });
   });
 

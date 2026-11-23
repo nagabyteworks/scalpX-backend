@@ -9,6 +9,7 @@ export interface MockServerOptions {
   sessionToken?: string;
   sessionInvalid?: boolean;
   acknowledgeSubscriptions?: boolean;
+  indexListResponse?: unknown;
 }
 
 export class MockFlattradeServer {
@@ -27,12 +28,14 @@ export class MockFlattradeServer {
   public sessionInvalid: boolean;
   public acknowledgeSubscriptions: boolean;
   public expectedApiKey?: string;
+  public indexListResponse?: unknown;
 
   constructor(options: MockServerOptions = {}) {
     this.sessionToken = options.sessionToken ?? 'MOCK_SESSION_TOKEN_ABC';
     this.sessionInvalid = options.sessionInvalid ?? false;
     this.acknowledgeSubscriptions = options.acknowledgeSubscriptions ?? true;
     this.expectedApiKey = options.expectedApiKey;
+    this.indexListResponse = options.indexListResponse;
 
     this.httpServer = http.createServer((req, res) => {
       let body = '';
@@ -56,9 +59,9 @@ export class MockFlattradeServer {
           // Connection handshake
           if (parsed.t === 'a') {
             if (parsed.accesstoken === this.sessionToken) {
-              ws.send(JSON.stringify({ t: 'ck', s: 'OK' }));
+              ws.send(JSON.stringify({ t: 'ak', s: 'Ok' }));
             } else {
-              ws.send(JSON.stringify({ t: 'ck', s: 'NOT_OK' }));
+              ws.send(JSON.stringify({ t: 'ak', s: 'Not_Ok' }));
             }
           }
           // Touchline subscription
@@ -105,9 +108,9 @@ export class MockFlattradeServer {
       const requestData = payload ? JSON.parse(payload) as { exch?: string } : {};
       res.writeHead(200, { 'Content-Type': 'application/json' });
       // Test fixture only. This is deliberately not a production token or live-broker evidence.
-      res.end(JSON.stringify(requestData.exch === 'BSE'
+      res.end(JSON.stringify(this.indexListResponse ?? (requestData.exch === 'BSE'
         ? { stat: 'Ok', values: [{ idxname: 'SENSEX', token: '987654321' }] }
-        : { stat: 'Ok', values: [] }));
+        : { stat: 'Ok', values: [{ idxname: 'Nifty 50', token: '26000' }] })));
       return;
     }
 
@@ -211,7 +214,7 @@ export class MockFlattradeServer {
 
   broadcastTick(exchange: string, token: string, lp: string, bp1 = '99.95', sp1 = '100.05'): void {
     const msg = JSON.stringify({
-      t: 'tk',
+      t: 'tf',
       e: exchange,
       tk: token,
       lp,

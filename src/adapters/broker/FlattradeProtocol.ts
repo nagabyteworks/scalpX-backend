@@ -13,9 +13,26 @@ export const FLATTRADE_ENDPOINTS = {
   POSITION_BOOK: '/PositionBook',
   LIMITS: '/Limits',
   GET_INDEX_LIST: '/GetIndexList',
-  GET_OPTION_CHAIN: '/GetOptionChain',
   GET_QUOTES: '/GetQuotes',
 } as const;
+
+export const FLATTRADE_INDEX_CONTRACT_MASTER_URLS = {
+  NFO: 'https://flattrade.s3.ap-south-1.amazonaws.com/scripmaster/Nfo_Index_Derivatives.csv',
+  BFO: 'https://flattrade.s3.ap-south-1.amazonaws.com/scripmaster/Bfo_Index_Derivatives.csv',
+} as const;
+
+export type FlattradeDerivativesExchange = keyof typeof FLATTRADE_INDEX_CONTRACT_MASTER_URLS;
+
+export interface FlattradeIndexOptionContract {
+  exchange: FlattradeDerivativesExchange;
+  underlyingSymbol: string;
+  token: string;
+  symbol: string;
+  expiry: string;
+  strike: number;
+  optionType: 'CE' | 'PE';
+  lotSize: number;
+}
 
 export interface FlattradeTokenRequest {
   api_key: string;
@@ -115,7 +132,11 @@ export interface FlattradeQuote {
   emsg?: string;
 }
 
-export interface FlattradeIndexEntry { idxname: string; token: string }
+export interface FlattradeIndexEntry {
+  idxname: string;
+  token: string | null;
+  exchange: string;
+}
 
 export interface OrderUpdateEvent {
   norenordno: string;

@@ -8,6 +8,8 @@ import type {
   FlattradeOrderBookItem,
   FlattradePosition,
   FlattradeQuote,
+  FlattradeIndexOptionContract,
+  FlattradeDerivativesExchange,
 } from '../../adapters/broker/FlattradeProtocol.js';
 
 export interface BrokerPort {
@@ -20,5 +22,8 @@ export interface BrokerPort {
   getOrderBook(): Promise<FlattradeOrderBookItem[]>;
   getPositionBook(): Promise<FlattradePosition[]>;
   getQuotes(exch: string, token: string): Promise<FlattradeQuote>;
-  getOptionChain?(exch: string, tsym: string, strprc: string, count: number): Promise<unknown>;
+  getIndexOptionContracts(
+    exch: FlattradeDerivativesExchange,
+    underlyingSymbol: string
+  ): Promise<FlattradeIndexOptionContract[]>;
 }

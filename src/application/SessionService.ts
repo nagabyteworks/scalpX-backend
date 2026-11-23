@@ -1,4 +1,8 @@
-import { FlattradeOAuthError, type FlattradeRestAdapter } from '../adapters/broker/FlattradeRestAdapter.js';
+import {
+  FlattradeIndexListError,
+  FlattradeOAuthError,
+  type FlattradeRestAdapter,
+} from '../adapters/broker/FlattradeRestAdapter.js';
 import type { StateStorePort } from '../domain/ports/StateStorePort.js';
 import type { FlattradeWsAdapter } from '../adapters/broker/FlattradeWsAdapter.js';
 import type { ReconcilerService } from './ReconcilerService.js';
@@ -28,6 +32,23 @@ export interface SessionServiceOptions {
 
 export type SessionValidity = 'VALID' | 'INVALID' | 'UNKNOWN';
 
+export type IndexResolutionErrorCode =
+  | 'INDEX_NOT_FOUND'
+  | 'INVALID_INDEX_TOKEN'
+  | 'AMBIGUOUS_INDEX'
+  | 'INVALID_INDEX_EXCHANGE'
+  | 'BROKER_SESSION_UNAVAILABLE'
+  | 'BROKER_API_FAILURE'
+  | 'INVALID_INDEX_RESPONSE'
+  | 'UNSUPPORTED_INDEX';
+
+export class IndexResolutionError extends Error {
+  constructor(readonly code: IndexResolutionErrorCode, message: string) {
+    super(message);
+    this.name = 'IndexResolutionError';
+  }
+}
+
 export type SessionAuthenticationStage =
   | 'oauth_exchange'
   | 'token_persistence'
@@ -54,8 +75,7 @@ export class SessionService {
   private wsFeed?: FlattradeWsAdapter;
   private reconciler?: ReconcilerService;
   private wsHub?: ClientWsHub;
-  private sensexIndexToken: string | null = null;
-  private sensexIndexResolvedDate: string | null = null;
+  private readonly indexInstrumentCache = new Map<string, { tradeDate: string; instrumentId: string }>();
 
   private sessionValidationCache: { token: string; checkedAt: number; validity: SessionValidity } | null = null;
 
@@ -141,41 +161,72 @@ export class SessionService {
   }
 
   async getSensexSpotInstrumentId(): Promise<string> {
-    const tradeDate = getTodayDateIST();
-    if (!this.sensexIndexToken || this.sensexIndexResolvedDate !== tradeDate) {
-      const indices = await this.broker.getIndexList('BSE');
-      const matches = indices.filter((index) => index.idxname.trim().toUpperCase() === 'SENSEX');
-      if (matches.length !== 1 || !/^\d+$/.test(matches[0]!.token)) {
-        this.sensexIndexToken = null;
-        this.sensexIndexResolvedDate = null;
-        throw new Error('Flattrade BSE index list did not return one valid SENSEX token.');
-      }
-      this.sensexIndexToken = matches[0]!.token;
-      this.sensexIndexResolvedDate = tradeDate;
-    }
-    return `BSE|${this.sensexIndexToken}`;
+    return this.getIndexSpotInstrumentId('SENSEX');
   }
 
   async getIndexSpotInstrumentId(symbol: string): Promise<string> {
-    const normalized = symbol.trim().toUpperCase();
-    if (normalized === 'SENSEX') return this.getSensexSpotInstrumentId();
-    if (normalized === 'NIFTY') {
-      const indices = await this.broker.getIndexList('NSE');
-      const matches = indices.filter((index) => index.idxname.trim().toUpperCase() === 'NIFTY');
-      if (matches.length !== 1 || !/^\d+$/.test(matches[0]!.token)) {
-        throw new Error('Flattrade NSE index list did not return one valid NIFTY token.');
-      }
-      return `NSE|${matches[0]!.token}`;
+    const requested = symbol.trim().toUpperCase().replace(/\s+/g, ' ');
+    const canonical = requested === 'NIFTY 50'
+      ? 'NIFTY'
+      : requested === 'NIFTY BANK'
+        ? 'BANKNIFTY'
+        : requested;
+    const aliases: Record<string, { exchange: 'NSE' | 'BSE'; names: ReadonlySet<string> }> = {
+      NIFTY: { exchange: 'NSE', names: new Set(['NIFTY', 'NIFTY 50']) },
+      SENSEX: { exchange: 'BSE', names: new Set(['SENSEX']) },
+      BANKNIFTY: { exchange: 'NSE', names: new Set(['BANKNIFTY', 'NIFTY BANK']) },
+    };
+    const definition = aliases[canonical];
+    if (!definition) {
+      throw new IndexResolutionError('UNSUPPORTED_INDEX', `Unsupported index symbol: ${canonical || '(empty)'}.`);
     }
-    if (normalized === 'BANKNIFTY') {
-      const indices = await this.broker.getIndexList('NSE');
-      const matches = indices.filter((index) => /BANK.*NIFTY/i.test(index.idxname));
-      if (matches.length !== 1 || !/^\d+$/.test(matches[0]!.token)) {
-        throw new Error('Flattrade NSE index list did not return one valid BANKNIFTY token.');
+
+    const tradeDate = getTodayDateIST();
+    const cached = this.indexInstrumentCache.get(canonical);
+    if (cached?.tradeDate === tradeDate) return cached.instrumentId;
+
+    let indices;
+    try {
+      indices = await this.broker.getIndexList(definition.exchange);
+    } catch (error) {
+      if (error instanceof FlattradeIndexListError) {
+        throw new IndexResolutionError(error.code, error.message);
       }
-      return `NSE|${matches[0]!.token}`;
+      throw new IndexResolutionError('BROKER_API_FAILURE', 'Flattrade index-list request failed.');
     }
-    throw new Error(`Unsupported index: ${normalized}`);
+
+    const matches = indices.filter((index) =>
+      definition.names.has(index.idxname.trim().toUpperCase().replace(/\s+/g, ' '))
+    );
+    if (matches.some((index) => index.exchange !== definition.exchange)) {
+      throw new IndexResolutionError(
+        'INVALID_INDEX_EXCHANGE',
+        `Flattrade returned ${canonical} on an unexpected exchange.`
+      );
+    }
+    if (matches.length === 0) {
+      throw new IndexResolutionError(
+        'INDEX_NOT_FOUND',
+        `Flattrade ${definition.exchange} index list did not contain ${canonical}.`
+      );
+    }
+    if (matches.length > 1) {
+      throw new IndexResolutionError(
+        'AMBIGUOUS_INDEX',
+        `Flattrade ${definition.exchange} index list returned multiple candidates for ${canonical}.`
+      );
+    }
+    const token = matches[0]!.token;
+    if (!token || !/^\d+$/.test(token) || !/[1-9]/.test(token)) {
+      throw new IndexResolutionError(
+        'INVALID_INDEX_TOKEN',
+        `Flattrade ${definition.exchange} index list returned an invalid token for ${canonical}.`
+      );
+    }
+
+    const instrumentId = `${definition.exchange}|${token}`;
+    this.indexInstrumentCache.set(canonical, { tradeDate, instrumentId });
+    return instrumentId;
   }
 
   private async ensureSensexSpotSubscription(): Promise<void> {

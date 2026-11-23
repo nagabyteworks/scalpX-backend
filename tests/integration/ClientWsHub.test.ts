@@ -159,6 +159,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
     const live = marketMessages.at(-1);
     expect(live).toMatchObject({
       indexSymbol: 'SENSEX',
+      spotExchange: 'BSE',
       spotLtpPaise: 8_200_000,
       selectedExpiry: '2026-11-26',
       atmStrike: 82000,
@@ -167,9 +168,18 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
       peToken: '911',
       peLtpPaise: 11_250,
       feedStatus: 'CONNECTED',
+      marketDataReady: true,
     });
     expect(live.marketDataTimestamp).toBe(timestamp);
 
+    hub.setFeedStatus('FEED_STALE');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const disconnectedFeed = marketMessages.at(-1);
+    expect(disconnectedFeed.spotLtpPaise).toBeNull();
+    expect(disconnectedFeed.marketDataReady).toBe(false);
+    expect(disconnectedFeed.feedStatus).toBe('STALE');
+
+    hub.setFeedStatus('CONNECTED');
     hub.updateTick({ token: '901', exchange: 'BSE', ltpPaise: 8_210_000, timestamp: Date.now() - 4_000 });
     await new Promise((resolve) => setTimeout(resolve, 100));
     const stale = marketMessages.at(-1);

@@ -64,6 +64,7 @@ async function bootstrap() {
       userId: env.FLATTRADE_USER_ID,
       accountId: env.FLATTRADE_ACCOUNT_ID,
       sessionToken: '',
+      initialTickTimeoutMs: env.MARKET_DATA_INITIAL_TICK_TIMEOUT_MS,
     });
 
     flattradeWs.onTick((tick) => {

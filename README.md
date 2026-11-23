@@ -32,7 +32,7 @@ Flattrade OAuth remains a separate broker-session flow:
 
 - `SessionService`: Flattrade broker session validation and OAuth callback handling.
 - `HttpServer`: REST API and direct Android integration.
-- `ClientWsHub`: authenticated Android WebSocket snapshots and priority events.
+- `ClientWsHub`: direct Android WebSocket snapshots and priority events.
 - `OrderManager`: entry, exit, and broker order lifecycle.
 - `RatchetLadderEngine`: RAM/in-memory ratcheting ladder state.
 - `ReconcilerService`: startup and recovery reconciliation.
@@ -42,23 +42,47 @@ Flattrade OAuth remains a separate broker-session flow:
 
 The backend is the only Flattrade market-data client. After OAuth, `SessionService`
 validates the saved Flattrade session and the broker WebSocket authenticates with
-that session. The backend resolves index tokens using Flattrade `GetIndexList`;
-it does not contain guessed index or option tokens.
+that session using the Pi WebSocket `ak` acknowledgement. The backend resolves
+index tokens using Flattrade `GetIndexList`; it accepts numeric or numeric-string
+tokens, normalizes index names, and requires an unambiguous exact alias on the
+requested exchange (`NIFTY`/`NIFTY 50` on NSE and `SENSEX` on BSE). It does not
+contain guessed index or option tokens.
 
 Android requests `/api/market-data/index?symbol=SENSEX` (or `NIFTY`). The backend
-subscribes to the resolved index instrument and reports its latest tick only while
-it is no more than 3 seconds old. Once the spot tick is fresh, Android requests
-`/api/option-chain`. The backend fetches contracts through Flattrade
-`GetOptionChain`, chooses the nearest future expiry with complete CE/PE pairs,
-calculates the nearest available paired strike to the live spot, subscribes to
-the selected-expiry contracts, and returns their verified symbols, tokens and lot
-sizes. If any capability, response field, contract pair or fresh tick is missing,
-the API reports a failure rather than substituting a price or contract.
+subscribes to the resolved index instrument and waits for the first fresh tick
+using an event-driven waiter. The timeout is controlled by
+`MARKET_DATA_INITIAL_TICK_TIMEOUT_MS` (default 5000 ms, 250–30000 ms). The endpoint
+returns structured errors rather than collapsing broker/session, instrument,
+WebSocket, subscription, and tick-timeout failures into a generic response. Once
+the spot tick is fresh, Android requests `/api/option-chain`. The backend fetches contracts through Flattrade
+index-derivatives Scrip Master (`Nfo_Index_Derivatives.csv` for NFO or
+`Bfo_Index_Derivatives.csv` for BFO). The master is an official Flattrade source
+of current exchange tokens, underlying names, contract symbols, instrument
+types, expiries, strikes, option types and lot sizes. The backend filters the
+exact index underlying, keeps only valid `OPTIDX` CE/PE records, and selects the
+nearest future expiry containing complete call/put pairs. It calculates ATM
+from the complete strike list, returns a bounded window of actual paired
+contracts, subscribes only to those instruments, and waits for fresh WebSocket
+ticks on the selected ATM CE and PE. The source is cached in memory for at most
+15 minutes and is refreshed after expiry; an unavailable or invalid master
+produces an explicit error rather than a fallback.
+
+The backend deliberately does not call `GetOptionChain` with a bare index
+display name. Flattrade documents that endpoint's `tradingsymbol` as the symbol
+of an existing option or future contract; the contract master avoids guessing
+that symbol and also supplies the complete expiry/strike metadata required by
+the app. See [Flattrade's Python API documentation](https://github.com/flattrade/pythonAPI/blob/main/README.md#md-get_optionchain)
+and the [NFO](https://flattrade.s3.ap-south-1.amazonaws.com/scripmaster/Nfo_Index_Derivatives.csv)
+and [BFO](https://flattrade.s3.ap-south-1.amazonaws.com/scripmaster/Bfo_Index_Derivatives.csv)
+masters.
 
 After selection, `/ws` sends an initial position and market-data snapshot, then
 coalesces updates at 150 ms. Each spot and option price includes its tick
 timestamp; stale prices are `null`. A broker reconnect restores remembered
-subscriptions, and snapshots resume with the new feed state. The Android app
+subscriptions, and snapshots resume with the new feed state. The broker adapter
+deduplicates subscriptions, recognizes `ak` auth acknowledgements, `tk` touchline
+acknowledgements, and `tf` updates, and stops reconnecting after the broker rejects
+the current session. The Android app
 uses the timestamps and feed status to prevent entries against stale prices.
 See [API contract](docs/api-contract.md) for the WebSocket shape and readiness
 states.
@@ -84,6 +108,7 @@ Required live configuration:
 - `FLATTRADE_API_SECRET`
 - `FLATTRADE_REDIRECT_URL`
 - `DB_SESSION_ENCRYPTION_KEY`
+- `MARKET_DATA_INITIAL_TICK_TIMEOUT_MS` (optional; defaults to 5000 ms, valid range 250–30000)
 - `TRADING_ENABLED=false`
 - `BROKER_MODE=live`
 

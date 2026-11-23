@@ -15,8 +15,124 @@ import {
   type FlattradeOrderBookItem,
   type FlattradeQuote,
   type FlattradeIndexEntry,
+  type FlattradeIndexOptionContract,
+  type FlattradeDerivativesExchange,
   type FlattradeTokenResponse,
+  FLATTRADE_INDEX_CONTRACT_MASTER_URLS,
 } from './FlattradeProtocol.js';
+
+const CONTRACT_MASTER_CACHE_MS = 15 * 60 * 1000;
+
+function parseCsvRow(line: string): string[] | null {
+  const fields: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index]!;
+    if (quoted) {
+      if (character === '"' && line[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') {
+        quoted = false;
+      } else {
+        field += character;
+      }
+    } else if (character === ',' ) {
+      fields.push(field);
+      field = '';
+    } else if (character === '"' && field.length === 0) {
+      quoted = true;
+    } else {
+      field += character;
+    }
+  }
+  if (quoted) return null;
+  fields.push(field);
+  return fields;
+}
+
+function parseMasterExpiry(value: string): string | null {
+  const match = /^(\d{1,2})-([A-Z]{3})-(\d{4})$/i.exec(value.trim());
+  if (!match) return null;
+  const months: Record<string, number> = {
+    JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
+    JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+  };
+  const day = Number(match[1]);
+  const month = months[match[2]!.toUpperCase()];
+  const year = Number(match[3]);
+  if (month === undefined) return null;
+  const date = new Date(Date.UTC(year, month, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return null;
+  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+export function parseFlattradeIndexOptionMaster(
+  csv: string,
+  exchange: FlattradeDerivativesExchange
+): Map<string, FlattradeIndexOptionContract[]> {
+  const lines = csv.replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.length > 0);
+  const headers = lines[0] ? parseCsvRow(lines[0]) : null;
+  const requiredHeaders = ['Exchange', 'Token', 'Lotsize', 'Symbol', 'Tradingsymbol', 'Instrument', 'Expiry', 'Strike', 'Optiontype'];
+  if (!headers || requiredHeaders.some((header) => !headers.includes(header))) {
+    throw new Error('Flattrade index contract master has an invalid header.');
+  }
+  const indexes = new Map(headers.map((header, index) => [header, index]));
+  const grouped = new Map<string, FlattradeIndexOptionContract[]>();
+  const seen = new Set<string>();
+
+  for (const line of lines.slice(1)) {
+    const fields = parseCsvRow(line);
+    if (!fields || fields.length !== headers.length) {
+      throw new Error('Flattrade index contract master contains a malformed row.');
+    }
+    const field = (name: string) => fields[indexes.get(name)!]!.trim();
+    if (field('Exchange').toUpperCase() !== exchange || field('Instrument').toUpperCase() !== 'OPTIDX') continue;
+
+    const underlyingSymbol = field('Symbol').toUpperCase();
+    const token = field('Token');
+    const symbol = field('Tradingsymbol');
+    const expiry = parseMasterExpiry(field('Expiry'));
+    const strike = Number(field('Strike'));
+    const lotSize = Number(field('Lotsize'));
+    const optionType = field('Optiontype').toUpperCase();
+    if (!underlyingSymbol || !/^[1-9]\d*$/.test(token) || !symbol || !expiry ||
+      !Number.isSafeInteger(lotSize) || lotSize <= 0 ||
+      !Number.isFinite(strike) || strike <= 0 ||
+      (optionType !== 'CE' && optionType !== 'PE')) {
+      throw new Error('Flattrade index contract master contains invalid option metadata.');
+    }
+
+    const contract: FlattradeIndexOptionContract = {
+      exchange,
+      underlyingSymbol,
+      token,
+      symbol,
+      expiry,
+      strike,
+      optionType,
+      lotSize,
+    };
+    const contractKey = `${underlyingSymbol}|${expiry}|${strike}|${optionType}`;
+    if (seen.has(contractKey)) {
+      throw new Error('Flattrade index contract master contains an ambiguous option contract.');
+    }
+    seen.add(contractKey);
+    const contracts = grouped.get(underlyingSymbol) ?? [];
+    contracts.push(contract);
+    grouped.set(underlyingSymbol, contracts);
+  }
+
+  for (const contracts of grouped.values()) {
+    contracts.sort((left, right) =>
+      left.expiry.localeCompare(right.expiry) ||
+      left.strike - right.strike ||
+      left.optionType.localeCompare(right.optionType)
+    );
+  }
+  return grouped;
+}
 
 export interface FlattradeConfig {
   apiKey: string;
@@ -48,6 +164,28 @@ export class FlattradeOAuthError extends Error {
   }
 }
 
+export type FlattradeIndexListErrorCode =
+  | 'BROKER_SESSION_UNAVAILABLE'
+  | 'BROKER_API_FAILURE'
+  | 'INVALID_INDEX_RESPONSE';
+
+export class FlattradeContractMasterError extends Error {
+  constructor(
+    readonly code: 'CONTRACT_MASTER_UNAVAILABLE' | 'INVALID_CONTRACT_MASTER',
+    message: string
+  ) {
+    super(message);
+    this.name = 'FlattradeContractMasterError';
+  }
+}
+
+export class FlattradeIndexListError extends Error {
+  constructor(readonly code: FlattradeIndexListErrorCode, message: string) {
+    super(message);
+    this.name = 'FlattradeIndexListError';
+  }
+}
+
 function sanitizeBrokerMessage(message: unknown, secrets: string[]): string | null {
   if (typeof message !== 'string') return null;
 
@@ -70,6 +208,14 @@ export class FlattradeRestAdapter implements BrokerPort {
   private readonly authUrl: string;
   private readonly dispatcher: Agent;
   private sessionToken: string | null = null;
+  private readonly contractMasterCache = new Map<
+    FlattradeDerivativesExchange,
+    { expiresAt: number; contractsBySymbol: Map<string, FlattradeIndexOptionContract[]> }
+  >();
+  private readonly contractMasterLoads = new Map<
+    FlattradeDerivativesExchange,
+    Promise<Map<string, FlattradeIndexOptionContract[]>>
+  >();
 
   constructor(config: FlattradeConfig) {
     this.config = config;
@@ -344,16 +490,62 @@ export class FlattradeRestAdapter implements BrokerPort {
   }
 
   async getIndexList(exch: 'NSE' | 'BSE'): Promise<FlattradeIndexEntry[]> {
-    const response = await this.postForm<{ stat?: string; values?: unknown; emsg?: string }>(
-      FLATTRADE_ENDPOINTS.GET_INDEX_LIST,
-      { uid: this.config.userId, exch }
-    );
-    if (response.stat !== 'Ok' || !Array.isArray(response.values)) return [];
+    let response: { stat?: string; values?: unknown; emsg?: string };
+    try {
+      response = await this.postForm<{ stat?: string; values?: unknown; emsg?: string }>(
+        FLATTRADE_ENDPOINTS.GET_INDEX_LIST,
+        { uid: this.config.userId, exch }
+      );
+    } catch (error) {
+      const missingSession = error instanceof Error && /session token not initialized/i.test(error.message);
+      throw new FlattradeIndexListError(
+        missingSession ? 'BROKER_SESSION_UNAVAILABLE' : 'BROKER_API_FAILURE',
+        missingSession
+          ? 'Flattrade session is unavailable for GetIndexList.'
+          : 'Flattrade GetIndexList request failed.'
+      );
+    }
+    if (response.stat !== 'Ok') {
+      const brokerMessage = sanitizeBrokerMessage(response.emsg, [
+        this.config.apiKey,
+        this.config.apiSecret,
+        this.sessionToken ?? '',
+      ]);
+      const sessionRejected = /session expired|invalid session key|invalid session/i.test(brokerMessage ?? '');
+      throw new FlattradeIndexListError(
+        sessionRejected ? 'BROKER_SESSION_UNAVAILABLE' : 'BROKER_API_FAILURE',
+        sessionRejected
+          ? 'Flattrade rejected the index-list request; verify the broker session.'
+          : 'Flattrade GetIndexList returned an unsuccessful response.'
+      );
+    }
+    if (!Array.isArray(response.values)) {
+      throw new FlattradeIndexListError(
+        'INVALID_INDEX_RESPONSE',
+        'Flattrade GetIndexList returned an invalid values field.'
+      );
+    }
     return response.values.flatMap((value): FlattradeIndexEntry[] => {
       if (!value || typeof value !== 'object') return [];
       const item = value as Record<string, unknown>;
-      if (typeof item.idxname !== 'string' || typeof item.token !== 'string' || !/^\d+$/.test(item.token)) return [];
-      return [{ idxname: item.idxname.trim(), token: item.token }];
+      if (typeof item.idxname !== 'string' || !item.idxname.trim()) return [];
+      const rawToken = item.token;
+      const token = typeof rawToken === 'string'
+        ? (/^\d+$/.test(rawToken.trim()) && /[1-9]/.test(rawToken.trim()) ? rawToken.trim() : null)
+        : typeof rawToken === 'number' && Number.isSafeInteger(rawToken) && rawToken > 0
+          ? String(rawToken)
+          : null;
+      const rawExchange = item.exch ?? item.exchange;
+      const exchange = rawExchange === undefined
+        ? exch
+        : typeof rawExchange === 'string'
+          ? rawExchange.trim().toUpperCase()
+          : '';
+      return [{
+        idxname: item.idxname.trim().replace(/\s+/g, ' '),
+        token,
+        exchange,
+      }];
     });
   }
 
@@ -372,15 +564,74 @@ export class FlattradeRestAdapter implements BrokerPort {
     }
   }
 
-  async getOptionChain(exch: string, tsym: string, strprc: string, count: number): Promise<unknown> {
-    const payload = {
-      uid: this.config.userId,
-      exch,
-      tsym: encodeURIComponent(tsym),
-      strprc,
-      cnt: String(count),
-    };
-    return this.postForm<unknown>(FLATTRADE_ENDPOINTS.GET_OPTION_CHAIN, payload);
+  async getIndexOptionContracts(
+    exchange: FlattradeDerivativesExchange,
+    underlyingSymbol: string
+  ): Promise<FlattradeIndexOptionContract[]> {
+    const symbol = underlyingSymbol.trim().toUpperCase();
+    if (!symbol) throw new Error('An underlying symbol is required to resolve Flattrade option contracts.');
+    if (!Object.hasOwn(FLATTRADE_INDEX_CONTRACT_MASTER_URLS, exchange)) {
+      throw new FlattradeContractMasterError('INVALID_CONTRACT_MASTER', 'Unsupported Flattrade derivatives exchange.');
+    }
+
+    let contractsBySymbol = this.contractMasterCache.get(exchange)?.contractsBySymbol;
+    if (!contractsBySymbol || (this.contractMasterCache.get(exchange)?.expiresAt ?? 0) <= Date.now()) {
+      let load = this.contractMasterLoads.get(exchange);
+      if (!load) {
+        load = this.downloadIndexOptionMaster(exchange)
+          .then((contracts) => {
+            this.contractMasterCache.set(exchange, {
+              expiresAt: Date.now() + CONTRACT_MASTER_CACHE_MS,
+              contractsBySymbol: contracts,
+            });
+            return contracts;
+          })
+          .finally(() => this.contractMasterLoads.delete(exchange));
+        this.contractMasterLoads.set(exchange, load);
+      }
+      contractsBySymbol = await load;
+    }
+    return [...(contractsBySymbol.get(symbol) ?? [])];
+  }
+
+  private async downloadIndexOptionMaster(
+    exchange: FlattradeDerivativesExchange
+  ): Promise<Map<string, FlattradeIndexOptionContract[]>> {
+    let response: Response;
+    try {
+      response = await fetch(FLATTRADE_INDEX_CONTRACT_MASTER_URLS[exchange], {
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      throw new FlattradeContractMasterError('CONTRACT_MASTER_UNAVAILABLE', 'Flattrade index contract master request failed.');
+    }
+    if (!response.ok) {
+      throw new FlattradeContractMasterError(
+        'CONTRACT_MASTER_UNAVAILABLE',
+        `Flattrade index contract master returned HTTP ${response.status}.`
+      );
+    }
+    const contentLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > 50_000_000) {
+      throw new FlattradeContractMasterError('INVALID_CONTRACT_MASTER', 'Flattrade index contract master exceeds the supported size.');
+    }
+    let csv: string;
+    try {
+      csv = await response.text();
+    } catch {
+      throw new FlattradeContractMasterError(
+        'CONTRACT_MASTER_UNAVAILABLE',
+        'Flattrade index contract master response could not be read.'
+      );
+    }
+    try {
+      return parseFlattradeIndexOptionMaster(csv, exchange);
+    } catch {
+      throw new FlattradeContractMasterError(
+        'INVALID_CONTRACT_MASTER',
+        'Flattrade index contract master has an invalid or ambiguous contract response.'
+      );
+    }
   }
 
   /**

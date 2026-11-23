@@ -11,6 +11,8 @@ import type {
   FlattradeOrderBookItem,
   FlattradePosition,
   FlattradeQuote,
+  FlattradeIndexOptionContract,
+  FlattradeDerivativesExchange,
 } from '../../src/adapters/broker/FlattradeProtocol.js';
 import { fromPaise } from '../../src/domain/models/Money.js';
 
@@ -329,9 +331,11 @@ export class MockBrokerAdapter implements BrokerPort {
     };
   }
 
-  async getOptionChain(exch: string, tsym: string, _strprc: string, count = 10): Promise<unknown> {
+  async getIndexOptionContracts(
+    _exchange: FlattradeDerivativesExchange,
+    _underlyingSymbol: string
+  ): Promise<FlattradeIndexOptionContract[]> {
     await this.applyLatency();
-    // Paper mode must not imply real exchange instruments or prices.
-    return { symbol: tsym.toUpperCase(), expiry: '', strikes: [], dataSource: 'SIMULATED', simulated: true };
+    return [];
   }
 }

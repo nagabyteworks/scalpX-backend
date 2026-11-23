@@ -54,6 +54,7 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
   });
 
   it('rejects broker WebSocket authentication failure instead of remaining pending', async () => {
+    const statusEvents: string[] = [];
     wsAdapter = new FlattradeWsAdapter({
       wsUrl,
       userId: 'FT001',
@@ -62,9 +63,12 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
       staleTimeoutMs: 1500,
       marketHoursOverride: false,
     });
+    wsAdapter.onStatus((status) => statusEvents.push(status));
     await expect(wsAdapter.connect()).rejects.toThrow('rejected WebSocket authentication');
     expect(wsAdapter.isAuthenticatedConnection()).toBe(false);
     expect(wsAdapter.isMarketDataReady()).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(statusEvents).not.toContain('RECONNECTING');
   });
 
   it('triggers FEED_STALE after 3000ms silence in market hours, terminates, and reconnects', async () => {
@@ -137,5 +141,84 @@ describe('FlattradeWsAdapter & Stale-Feed Watchdog Integration', () => {
     mockServer.broadcastTick('NFO', '902', '110.00');
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(wsAdapter.isMarketDataReady()).toBe(true);
+  });
+
+  it('deduplicates subscriptions and resolves concurrent first-tick waiters from real feed events', async () => {
+    await mockServer.stop();
+    mockServer = new MockFlattradeServer({
+      sessionToken: 'WS_SESSION_TOKEN',
+      acknowledgeSubscriptions: false,
+    });
+    wsUrl = (await mockServer.start()).wsUrl;
+    wsAdapter = new FlattradeWsAdapter({
+      wsUrl,
+      userId: 'FT001',
+      sessionToken: 'WS_SESSION_TOKEN',
+      marketHoursOverride: false,
+      initialTickTimeoutMs: 500,
+    });
+
+    await wsAdapter.connect();
+    await wsAdapter.subscribe(['BFO|901']);
+    const first = wsAdapter.waitForTick('BFO|901');
+    const second = wsAdapter.waitForTick('BFO|901');
+    await wsAdapter.subscribe(['BFO|901', 'NFO|902']);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mockServer.subscriptionMessages).toEqual(['BFO|901', 'NFO|902']);
+
+    mockServer.broadcastTick('BFO', '901', '110.25');
+    await expect(Promise.all([first, second])).resolves.toMatchObject([
+      { token: '901', ltpPaise: 11025 },
+      { token: '901', ltpPaise: 11025 },
+    ]);
+  });
+
+  it('cleans up timed-out first-tick waiters and reports a clear timeout', async () => {
+    await mockServer.stop();
+    mockServer = new MockFlattradeServer({
+      sessionToken: 'WS_SESSION_TOKEN',
+      acknowledgeSubscriptions: false,
+    });
+    wsUrl = (await mockServer.start()).wsUrl;
+    wsAdapter = new FlattradeWsAdapter({
+      wsUrl,
+      userId: 'FT001',
+      sessionToken: 'WS_SESSION_TOKEN',
+      marketHoursOverride: false,
+    });
+
+    await wsAdapter.connect();
+    await wsAdapter.subscribe(['NSE|26000']);
+    await expect(wsAdapter.waitForTick('NSE|26000', 20))
+      .rejects.toMatchObject({ code: 'INITIAL_TICK_NOT_RECEIVED' });
+
+    mockServer.broadcastTick('NSE', '26000', '110.25');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(wsAdapter.getLatestTick('NSE|26000')?.ltpPaise).toBe(11025);
+  });
+
+  it('rejects first-tick waiters immediately when the broker WebSocket disconnects', async () => {
+    await mockServer.stop();
+    mockServer = new MockFlattradeServer({
+      sessionToken: 'WS_SESSION_TOKEN',
+      acknowledgeSubscriptions: false,
+    });
+    wsUrl = (await mockServer.start()).wsUrl;
+    wsAdapter = new FlattradeWsAdapter({
+      wsUrl,
+      userId: 'FT001',
+      sessionToken: 'WS_SESSION_TOKEN',
+      marketHoursOverride: false,
+      initialTickTimeoutMs: 2000,
+    });
+
+    await wsAdapter.connect();
+    await wsAdapter.subscribe(['NFO|26000']);
+    const pendingTick = wsAdapter.waitForTick('NFO|26000');
+    await mockServer.stop();
+    mockServer = new MockFlattradeServer({ sessionToken: 'WS_SESSION_TOKEN' });
+    wsUrl = (await mockServer.start()).wsUrl;
+
+    await expect(pendingTick).rejects.toMatchObject({ code: 'WEBSOCKET_NOT_CONNECTED' });
   });
 });
