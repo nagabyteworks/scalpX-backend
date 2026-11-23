@@ -309,7 +309,7 @@ export class SqliteStateStore implements StateStorePort {
       const stored: string = row.token_encrypted_or_local;
 
       if (!this.tokenEncryption) {
-        // Paper mode — plaintext
+        // Test/store construction without an encryption key: used only by in-process test instances.
         return stored;
       }
 
