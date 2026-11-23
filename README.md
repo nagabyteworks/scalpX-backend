@@ -38,6 +38,39 @@ Flattrade OAuth remains a separate broker-session flow:
 - `ReconcilerService`: startup and recovery reconciliation.
 - `SqliteStateStore`: persistent audit, position, risk, session, and replay state.
 
+## Local macOS development
+
+The backend is a Node.js/TypeScript service. Its `package.json` scripts build
+with `npm run build` and start the compiled server with `npm start`; the default
+listener is `127.0.0.1:3000`, with `TRADING_ENABLED=false`. Android Emulator
+accesses this host through `http://10.0.2.2:3000`. Use Node.js 20 or newer, as
+required by `package.json`.
+
+Create a private local environment file and populate the required backend-only
+Flattrade credentials and encryption key:
+
+```bash
+cp -n .env.example .env
+npm install
+npm run build
+npm start
+```
+
+`.env` is ignored by git. The example lists the complete environment contract
+and uses empty secret fields so placeholder credentials cannot be mistaken for
+working values. `loadConfig()` requires valid Flattrade credentials and a
+64-character session encryption key before startup. Do not copy production
+environment files into this repository or into Android. The backend logs its
+bind host, port, and trading-enabled state at startup but never prints
+credentials.
+
+To reach the development server from a physical phone on the same trusted
+Wi-Fi, set `HOST=0.0.0.0` in the local `.env`, build Android with
+`DEV_SERVER_URL=http://<mac-lan-ip>:3000`, and allow incoming Node connections
+in the macOS firewall. Keep the phone on the same LAN, disable Wi-Fi client
+isolation if enabled, and do not forward port 3000 from the router or expose it
+to the public internet. Restore `HOST=127.0.0.1` after device testing.
+
 ## Live market-data flow
 
 The backend is the only Flattrade market-data client. After OAuth, `SessionService`

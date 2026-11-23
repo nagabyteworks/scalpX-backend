@@ -145,6 +145,12 @@ async function bootstrap() {
 
   const address = await server.listen(env.PORT, env.HOST);
   console.log(`⚡ scalpX Server listening at ${address}`);
+  console.log(JSON.stringify({
+    event: 'http_server_listening',
+    host: env.HOST,
+    port: env.PORT,
+    tradingEnabled: env.TRADING_ENABLED,
+  }));
 
   // 11. Graceful Shutdown Handlers
   let isShuttingDown = false;

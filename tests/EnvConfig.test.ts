@@ -18,6 +18,18 @@ describe('live-only environment configuration', () => {
     expect(cfg.HOST).toBe('127.0.0.1');
   });
 
+  it('accepts an explicit LAN listener for local physical-device testing', () => {
+    const cfg = loadConfig({
+      ...VALID_LIVE_ENV,
+      HOST: '0.0.0.0',
+      PORT: '3000',
+    } as NodeJS.ProcessEnv);
+
+    expect(cfg.HOST).toBe('0.0.0.0');
+    expect(cfg.PORT).toBe(3000);
+    expect(cfg.TRADING_ENABLED).toBe(false);
+  });
+
   it('rejects legacy paper mode rather than silently using a simulator', () => {
     expect(() => loadConfig({ ...VALID_LIVE_ENV, BROKER_MODE: 'paper' } as NodeJS.ProcessEnv)).toThrow(/PAPER broker mode is not supported/);
   });
