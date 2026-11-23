@@ -18,6 +18,7 @@ export interface PlaceOrderIntent {
   quantity: number;
   pricePaise: number;
   triggerPricePaise?: number; // Required for SL-LMT
+  product?: 'I' | 'M';
   priority?: OrderPriority;
   tag?: string;
 }
@@ -26,11 +27,13 @@ export interface ModifyOrderIntent {
   commandId: string;
   orderId: string;
   token: string;
+  exchange?: string;
   symbol: string;
   orderType: 'SL-LMT' | 'LMT';
   newQuantity?: number;
   newPricePaise: number;
   newTriggerPricePaise?: number; // Required for SL-LMT
+  product?: 'I' | 'M';
   priority?: OrderPriority;
 }
 

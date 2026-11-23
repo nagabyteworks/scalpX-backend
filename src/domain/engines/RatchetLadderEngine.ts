@@ -118,20 +118,27 @@ export class RatchetLadderEngine {
     }
 
     // 2. Check breakout threshold: While ltp < nextMilestone + breakoutBuffer, do nothing
-    const triggerThreshold = pos.nextMilestonePaise + pos.breakoutBufferPaise;
-    if (tick.ltpPaise < triggerThreshold) {
+    const isLong = pos.side === 'BUY';
+    const breakoutPrice = isLong
+      ? pos.nextMilestonePaise + pos.breakoutBufferPaise
+      : pos.nextMilestonePaise - pos.breakoutBufferPaise;
+    if ((isLong && tick.ltpPaise < breakoutPrice) || (!isLong && tick.ltpPaise > breakoutPrice)) {
       return;
     }
 
-    // 3. O(1) steps calculation for gap-up spikes (e.g. 109 -> 122 jumps to 120 in one broker call)
-    const stepsCrossed = Math.floor(
-      (tick.ltpPaise - pos.breakoutBufferPaise - pos.nextMilestonePaise) / pos.stepSizePaise
+    const stepsCrossed = isLong
+      ? Math.floor((tick.ltpPaise - pos.breakoutBufferPaise - pos.nextMilestonePaise) / pos.stepSizePaise)
+      : Math.floor((pos.nextMilestonePaise - pos.breakoutBufferPaise - tick.ltpPaise) / pos.stepSizePaise);
+    const newSlTrigger = roundDownToTick(
+      pos.nextMilestonePaise + (isLong ? 1 : -1) * stepsCrossed * pos.stepSizePaise
     );
-    const newSlTrigger = roundDownToTick(pos.nextMilestonePaise + stepsCrossed * pos.stepSizePaise);
-    const newSlLimit = roundDownToTick(newSlTrigger - pos.slippageBufferPaise);
+    const newSlLimit = isLong
+      ? roundDownToTick(newSlTrigger - pos.slippageBufferPaise)
+      : Math.ceil((newSlTrigger + pos.slippageBufferPaise) / 5) * 5;
 
     // 4. Guard: if activeSlTrigger !== null && newSlTrigger <= activeSlTrigger, return immediately
-    if (pos.activeSlTriggerPaise !== null && newSlTrigger <= pos.activeSlTriggerPaise) {
+    if (pos.activeSlTriggerPaise !== null &&
+      ((isLong && newSlTrigger <= pos.activeSlTriggerPaise) || (!isLong && newSlTrigger >= pos.activeSlTriggerPaise))) {
       return;
     }
 
@@ -145,12 +152,13 @@ export class RatchetLadderEngine {
           commandId: randomUUID(),
           token: pos.token,
           symbol: pos.symbol,
-          exchange: 'NFO',
-          side: 'SELL',
+          exchange: pos.exchange,
+          side: isLong ? 'SELL' : 'BUY',
           orderType: 'SL-LMT',
           quantity: pos.quantity,
           pricePaise: newSlLimit,
           triggerPricePaise: newSlTrigger,
+          product: pos.product,
           priority: 'NORMAL',
         });
         pos.activeSlOrderId = result.orderId;
@@ -166,11 +174,13 @@ export class RatchetLadderEngine {
           commandId: randomUUID(),
           orderId: pos.activeSlOrderId,
           token: pos.token,
+          exchange: pos.exchange,
           symbol: pos.symbol,
           orderType: 'SL-LMT',
           newQuantity: pos.quantity,
           newPricePaise: newSlLimit,
           newTriggerPricePaise: newSlTrigger,
+          product: pos.product,
           priority: 'NORMAL',
         });
         this.emitAlert({
@@ -184,7 +194,7 @@ export class RatchetLadderEngine {
       // 6. Update active SL trigger and next milestone ONLY after the broker call resolves
       pos.activeSlTriggerPaise = newSlTrigger;
       pos.activeSlLimitPaise = newSlLimit;
-      pos.nextMilestonePaise = newSlTrigger + pos.stepSizePaise;
+      pos.nextMilestonePaise = newSlTrigger + (isLong ? 1 : -1) * pos.stepSizePaise;
       pos.updatedAt = Date.now();
 
       // Async persistence to state store (zero-DB hot path)

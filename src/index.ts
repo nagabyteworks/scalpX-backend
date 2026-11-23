@@ -72,6 +72,7 @@ async function bootstrap() {
     });
 
   flattradeWs.onStatus((status) => {
+      clientWsHub.setFeedStatus(status);
       if (status === 'FEED_STALE') {
         clientWsHub.broadcastEvent('FEED_STALE', { message: 'Feed tick silence exceeded 3,000 ms' });
       }

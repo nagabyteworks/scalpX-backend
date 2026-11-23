@@ -149,7 +149,7 @@ export class RiskGuard {
       }
     }
 
-    if (this.limits.maxOpenQtyPerSymbol !== undefined && params.side === 'BUY') {
+    if (this.limits.maxOpenQtyPerSymbol !== undefined) {
       const resultingQty = params.currentOpenQty + params.quantity;
       if (resultingQty > this.limits.maxOpenQtyPerSymbol) {
         throw new RiskViolationError(

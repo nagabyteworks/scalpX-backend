@@ -203,7 +203,7 @@ export class FlattradeRestAdapter implements BrokerPort {
       tsym: encodeURIComponent(intent.symbol),
       qty: String(intent.quantity),
       prc: fromPaise(intent.pricePaise),
-      prd: 'I', // MIS scalping
+      prd: intent.product ?? 'I',
       trantype: intent.side === 'BUY' ? 'B' : 'S',
       prctyp: 'LMT',
       ret: 'DAY',
@@ -265,10 +265,11 @@ export class FlattradeRestAdapter implements BrokerPort {
     const payload: Record<string, unknown> = {
       uid: this.config.userId,
       norenordno: intent.orderId,
-      exch: 'NFO',
+      exch: intent.exchange ?? 'NFO',
       tsym: encodeURIComponent(intent.symbol),
       prctyp: intent.orderType,
       prc: fromPaise(intent.newPricePaise),
+      prd: intent.product ?? 'I',
       ordersource: 'API',
     };
 

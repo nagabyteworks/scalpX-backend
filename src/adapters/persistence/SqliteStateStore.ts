@@ -47,6 +47,7 @@ export class SqliteStateStore implements StateStorePort {
         exchange TEXT NOT NULL,
         qty INTEGER NOT NULL,
         product TEXT NOT NULL,
+        side TEXT NOT NULL DEFAULT 'BUY',
         entry_price_paise INTEGER NOT NULL,
         next_milestone_paise INTEGER NOT NULL,
         step_size_paise INTEGER NOT NULL,
@@ -58,6 +59,10 @@ export class SqliteStateStore implements StateStorePort {
         updated_at INTEGER NOT NULL
       );
     `);
+    const ladderColumns = this.db.pragma('table_info(active_ladders)') as Array<{ name: string }>;
+    if (!ladderColumns.some((column) => column.name === 'side')) {
+      this.db.exec("ALTER TABLE active_ladders ADD COLUMN side TEXT NOT NULL DEFAULT 'BUY'");
+    }
 
     // 3. order_audit_log table
     this.db.exec(`
@@ -140,18 +145,20 @@ export class SqliteStateStore implements StateStorePort {
     return this.enqueue(() => {
       const stmt = this.db.prepare(`
         INSERT INTO active_ladders (
-          token, trading_symbol, exchange, qty, product, entry_price_paise,
+          token, trading_symbol, exchange, qty, product, side, entry_price_paise,
           next_milestone_paise, step_size_paise, breakout_buffer_paise,
           slippage_buffer_paise, active_sl_order_id, active_sl_trigger_paise,
           status, updated_at
         ) VALUES (
-          @token, @trading_symbol, @exchange, @qty, @product, @entry_price_paise,
+          @token, @trading_symbol, @exchange, @qty, @product, @side, @entry_price_paise,
           @next_milestone_paise, @step_size_paise, @breakout_buffer_paise,
           @slippage_buffer_paise, @active_sl_order_id, @active_sl_trigger_paise,
           @status, @updated_at
         )
         ON CONFLICT(token) DO UPDATE SET
           qty = excluded.qty,
+          product = excluded.product,
+          side = excluded.side,
           next_milestone_paise = excluded.next_milestone_paise,
           step_size_paise = excluded.step_size_paise,
           breakout_buffer_paise = excluded.breakout_buffer_paise,
@@ -167,7 +174,8 @@ export class SqliteStateStore implements StateStorePort {
         trading_symbol: position.symbol,
         exchange: position.exchange,
         qty: position.quantity,
-        product: 'I',
+        product: position.product ?? 'I',
+        side: position.side,
         entry_price_paise: position.entryPricePaise,
         next_milestone_paise: position.nextMilestonePaise,
         step_size_paise: position.stepSizePaise,
@@ -219,7 +227,8 @@ export class SqliteStateStore implements StateStorePort {
         token: row.token,
         symbol: row.trading_symbol,
         exchange: row.exchange,
-        side: 'BUY',
+        side: row.side === 'SELL' ? 'SELL' : 'BUY',
+        product: row.product === 'M' ? 'M' : 'I',
         quantity: row.qty,
         entryPricePaise: row.entry_price_paise,
         nextMilestonePaise: row.next_milestone_paise,
@@ -248,7 +257,8 @@ export class SqliteStateStore implements StateStorePort {
         token: row.token,
         symbol: row.trading_symbol,
         exchange: row.exchange,
-        side: 'BUY',
+        side: row.side === 'SELL' ? 'SELL' : 'BUY',
+        product: row.product === 'M' ? 'M' : 'I',
         quantity: row.qty,
         entryPricePaise: row.entry_price_paise,
         nextMilestonePaise: row.next_milestone_paise,

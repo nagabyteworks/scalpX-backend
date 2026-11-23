@@ -219,6 +219,7 @@ export class FlattradeWsAdapter implements MarketFeedPort {
           const ltpPaise = toPaise(msg.lp);
           const tick: Tick = {
             token: String(msg.tk),
+            exchange: String(msg.e).toUpperCase(),
             ltpPaise,
             bestBidPaise: msg.bp1 ? toPaise(msg.bp1) : undefined,
             bestAskPaise: msg.sp1 ? toPaise(msg.sp1) : undefined,

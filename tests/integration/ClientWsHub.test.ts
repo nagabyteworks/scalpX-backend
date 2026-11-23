@@ -127,6 +127,58 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
     ws.close();
   });
 
+  it('broadcasts fresh spot and ATM CE/PE ticks and suppresses stale prices', async () => {
+    const ws = new WebSocket(wsUrl);
+    const marketMessages: any[] = [];
+    ws.on('message', (message) => {
+      const parsed = JSON.parse(message.toString());
+      if (parsed.marketData) marketMessages.push(parsed.marketData);
+    });
+    await new Promise<void>((resolve) => ws.on('open', () => resolve()));
+
+    hub.setFeedStatus('CONNECTED');
+    hub.setMarketDataSelection({
+      indexSymbol: 'SENSEX',
+      spot: { token: '901', symbol: 'SENSEX', exchange: 'BSE', lotSize: null },
+      expiry: '2026-11-26',
+      atmStrike: 82000,
+      call: { token: '910', symbol: 'SENSEX26NOV2682000CE', exchange: 'BFO', lotSize: 20 },
+      put: { token: '911', symbol: 'SENSEX26NOV2682000PE', exchange: 'BFO', lotSize: 20 },
+      strikes: [{
+        strikePrice: 82000,
+        call: { token: '910', symbol: 'SENSEX26NOV2682000CE', exchange: 'BFO', lotSize: 20 },
+        put: { token: '911', symbol: 'SENSEX26NOV2682000PE', exchange: 'BFO', lotSize: 20 },
+      }],
+    });
+    const timestamp = Date.now();
+    hub.updateTick({ token: '901', exchange: 'BSE', ltpPaise: 8_200_000, timestamp });
+    hub.updateTick({ token: '910', exchange: 'BFO', ltpPaise: 12_500, timestamp });
+    hub.updateTick({ token: '911', exchange: 'BFO', ltpPaise: 11_250, timestamp });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const live = marketMessages.at(-1);
+    expect(live).toMatchObject({
+      indexSymbol: 'SENSEX',
+      spotLtpPaise: 8_200_000,
+      selectedExpiry: '2026-11-26',
+      atmStrike: 82000,
+      ceToken: '910',
+      ceLtpPaise: 12_500,
+      peToken: '911',
+      peLtpPaise: 11_250,
+      feedStatus: 'CONNECTED',
+    });
+    expect(live.marketDataTimestamp).toBe(timestamp);
+
+    hub.updateTick({ token: '901', exchange: 'BSE', ltpPaise: 8_210_000, timestamp: Date.now() - 4_000 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const stale = marketMessages.at(-1);
+    expect(stale.spotLtpPaise).toBeNull();
+    expect(stale.spotTimestamp).toBeNull();
+    expect(stale.feedStatus).toBe('STALE');
+    ws.close();
+  });
+
   it('immediately pushes high-priority events bypassing throttle', async () => {
     const ws = new WebSocket(wsUrl, {
       headers: {

@@ -18,6 +18,7 @@ export interface ClientWsHubConfig {
 export interface PositionSnapshotItem {
   token: string;
   symbol: string;
+  side: 'BUY' | 'SELL';
   quantity: number;
   entryPricePaise: number;
   currentLtpPaise: number;
@@ -34,6 +35,62 @@ export interface TradingSnapshot {
   timestamp: number;
   positions: PositionSnapshotItem[];
   openPositionsCount: number;
+  marketData: MarketDataSnapshot | null;
+}
+
+export interface MarketDataContract {
+  token: string;
+  symbol: string;
+  exchange: string;
+  lotSize: number | null;
+}
+
+export interface MarketDataSelection {
+  indexSymbol: string;
+  spot: MarketDataContract;
+  expiry: string;
+  atmStrike: number;
+  call: MarketDataContract;
+  put: MarketDataContract;
+  strikes: Array<{
+    strikePrice: number;
+    call: MarketDataContract | null;
+    put: MarketDataContract | null;
+  }>;
+}
+
+export interface MarketDataSnapshot {
+  indexSymbol: string;
+  spotToken: string;
+  spotLtpPaise: number | null;
+  spotTimestamp: number | null;
+  selectedExpiry: string;
+  atmStrike: number;
+  ceSymbol: string;
+  ceToken: string;
+  ceLotSize: number | null;
+  ceLtpPaise: number | null;
+  ceTimestamp: number | null;
+  peSymbol: string;
+  peToken: string;
+  peLotSize: number | null;
+  peLtpPaise: number | null;
+  peTimestamp: number | null;
+  marketDataTimestamp: number | null;
+  feedStatus: 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'STALE' | 'WAITING_FOR_TICK';
+  strikes: Array<{
+    strikePrice: number;
+    ceToken: string | null;
+    ceLotSize: number | null;
+    ceSymbol: string | null;
+    ceLtpPaise: number | null;
+    ceTimestamp: number | null;
+    peToken: string | null;
+    peLotSize: number | null;
+    peSymbol: string | null;
+    peLtpPaise: number | null;
+    peTimestamp: number | null;
+  }>;
 }
 
 export class ClientWsHub {
@@ -42,6 +99,9 @@ export class ClientWsHub {
   private wss: WebSocketServer | null = null;
   private readonly clients = new Set<WebSocket>();
   private readonly latestLtpMap = new Map<string, number>();
+  private readonly latestTicks = new Map<string, Tick>();
+  private marketDataSelection: MarketDataSelection | null = null;
+  private feedStatus: 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' = 'DISCONNECTED';
   private throttleTimer: NodeJS.Timeout | null = null;
 
   constructor(config: ClientWsHubConfig, engine: RatchetLadderEngine) {
@@ -80,6 +140,17 @@ export class ClientWsHub {
    */
   updateTick(tick: Tick): void {
     this.latestLtpMap.set(tick.token, tick.ltpPaise);
+    if (tick.exchange) {
+      this.latestTicks.set(`${tick.exchange.toUpperCase()}|${tick.token}`, tick);
+    }
+  }
+
+  setMarketDataSelection(selection: MarketDataSelection | null): void {
+    this.marketDataSelection = selection;
+  }
+
+  setFeedStatus(status: 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'FEED_STALE'): void {
+    this.feedStatus = status === 'FEED_STALE' ? 'CONNECTED' : status;
   }
 
   /**
@@ -106,11 +177,12 @@ export class ClientWsHub {
     const activePositions = this.engine.getAllPositions().filter((p) => p.status === 'OPEN');
     const items: PositionSnapshotItem[] = activePositions.map((pos) => {
       const ltp = this.latestLtpMap.get(pos.token) ?? pos.entryPricePaise;
-      const unrealizedPnl = (ltp - pos.entryPricePaise) * pos.quantity;
+      const unrealizedPnl = (ltp - pos.entryPricePaise) * pos.quantity * (pos.side === 'BUY' ? 1 : -1);
 
       return {
         token: pos.token,
         symbol: pos.symbol,
+        side: pos.side,
         quantity: pos.quantity,
         entryPricePaise: pos.entryPricePaise,
         currentLtpPaise: ltp,
@@ -128,6 +200,79 @@ export class ClientWsHub {
       timestamp: Date.now(),
       positions: items,
       openPositionsCount: items.length,
+      marketData: this.buildMarketDataSnapshot(),
+    };
+  }
+
+  private buildMarketDataSnapshot(): MarketDataSnapshot | null {
+    const selection = this.marketDataSelection;
+    if (!selection) return null;
+
+    const now = Date.now();
+    const staleAfterMs = 3_000;
+    const feedAuthenticated = this.feedStatus === 'CONNECTED';
+    const readContract = (contract: MarketDataContract) => {
+      const tick = this.latestTicks.get(`${contract.exchange.toUpperCase()}|${contract.token}`);
+      const fresh = feedAuthenticated && tick !== undefined && now - tick.timestamp <= staleAfterMs;
+      return {
+        tick,
+        ltpPaise: fresh ? tick.ltpPaise : null,
+        timestamp: fresh ? tick.timestamp : null,
+        hadStaleTick: tick !== undefined && !fresh,
+      };
+    };
+
+    const spot = readContract(selection.spot);
+    const call = readContract(selection.call);
+    const put = readContract(selection.put);
+    const allFresh = spot.ltpPaise !== null && call.ltpPaise !== null && put.ltpPaise !== null;
+    const hasStaleTick = spot.hadStaleTick || call.hadStaleTick || put.hadStaleTick;
+    const feedStatus = this.feedStatus !== 'CONNECTED'
+      ? this.feedStatus
+      : allFresh
+        ? 'CONNECTED'
+        : hasStaleTick
+          ? 'STALE'
+          : 'WAITING_FOR_TICK';
+
+    return {
+      indexSymbol: selection.indexSymbol,
+      spotToken: selection.spot.token,
+      spotLtpPaise: spot.ltpPaise,
+      spotTimestamp: spot.timestamp,
+      selectedExpiry: selection.expiry,
+      atmStrike: selection.atmStrike,
+      ceSymbol: selection.call.symbol,
+      ceToken: selection.call.token,
+      ceLotSize: selection.call.lotSize,
+      ceLtpPaise: call.ltpPaise,
+      ceTimestamp: call.timestamp,
+      peSymbol: selection.put.symbol,
+      peToken: selection.put.token,
+      peLotSize: selection.put.lotSize,
+      peLtpPaise: put.ltpPaise,
+      peTimestamp: put.timestamp,
+      marketDataTimestamp: allFresh
+        ? Math.min(spot.timestamp!, call.timestamp!, put.timestamp!)
+        : null,
+      feedStatus,
+      strikes: selection.strikes.map((strike) => {
+        const ce = strike.call ? readContract(strike.call) : null;
+        const pe = strike.put ? readContract(strike.put) : null;
+        return {
+          strikePrice: strike.strikePrice,
+          ceToken: strike.call?.token ?? null,
+          ceLotSize: strike.call?.lotSize ?? null,
+          ceSymbol: strike.call?.symbol ?? null,
+          ceLtpPaise: ce?.ltpPaise ?? null,
+          ceTimestamp: ce?.timestamp ?? null,
+          peToken: strike.put?.token ?? null,
+          peLotSize: strike.put?.lotSize ?? null,
+          peSymbol: strike.put?.symbol ?? null,
+          peLtpPaise: pe?.ltpPaise ?? null,
+          peTimestamp: pe?.timestamp ?? null,
+        };
+      }),
     };
   }
 

@@ -6,6 +6,7 @@ export interface LadderPosition {
   symbol: string;
   exchange: string;
   side: PositionSide;
+  product?: 'I' | 'M';
   quantity: number;
   entryPricePaise: number;
 

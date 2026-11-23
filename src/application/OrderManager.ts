@@ -7,15 +7,19 @@ import { MarketableLimitPricer, type PricingBufferConfig } from '../domain/engin
 import type { LadderPosition } from '../domain/models/LadderPosition.js';
 import type { OrderUpdateEvent } from '../adapters/broker/FlattradeProtocol.js';
 import { toPaise } from '../domain/models/Money.js';
+import type { OrderSide } from '../domain/models/OrderIntent.js';
 
 export interface OneClickEntryParams {
   commandId: string;
   token: string;
   symbol: string;
   exchange: string;
+  side?: OrderSide;
+  product?: 'I' | 'M';
   quantity: number;
   ltpPaise: number;
   bestAskPaise?: number;
+  bestBidPaise?: number;
   pricingBuffer?: PricingBufferConfig;
   stepSizePaise: number;
   breakoutBufferPaise: number;
@@ -41,6 +45,8 @@ export class OrderManager {
 
   // 60-second commandId deduplication cache
   private readonly processedCommands = new Map<string, { timestamp: number; result: unknown }>();
+  private readonly inFlightEntries = new Map<string, Promise<LadderPosition>>();
+  private readonly inFlightEntryTokens = new Set<string>();
 
   // In-flight order fill listeners
   private readonly pendingFills = new Map<string, (update: OrderUpdateEvent) => void>();
@@ -102,20 +108,44 @@ export class OrderManager {
     const cached = this.checkIdempotency<LadderPosition>(params.commandId);
     if (cached) return cached;
 
+    const inFlight = this.inFlightEntries.get(params.commandId);
+    if (inFlight) return inFlight;
+    if (this.inFlightEntryTokens.has(params.token)) {
+      throw new Error(`An entry order is already in flight for ${params.token}.`);
+    }
+
+    const entry = this.executeEntry(params);
+    this.inFlightEntries.set(params.commandId, entry);
+    this.inFlightEntryTokens.add(params.token);
+    try {
+      return await entry;
+    } finally {
+      this.inFlightEntryTokens.delete(params.token);
+      if (this.inFlightEntries.get(params.commandId) === entry) {
+        this.inFlightEntries.delete(params.commandId);
+      }
+    }
+  }
+
+  private async executeEntry(params: OneClickEntryParams): Promise<LadderPosition> {
+    const side = params.side ?? 'BUY';
     // 1. Risk check
     const currentPosition = this.engine.getPosition(params.token);
+    if (currentPosition?.status === 'OPEN') {
+      throw new Error(`An open position already exists for ${params.symbol}; close it before entering again.`);
+    }
     this.riskGuard.validateOrder({
       symbol: params.symbol,
       quantity: params.quantity,
-      side: 'BUY',
+      side,
       currentOpenQty: currentPosition ? currentPosition.quantity : 0,
     });
 
     // 2. Price calculation (spread crossing)
     const limitPricePaise = MarketableLimitPricer.calculatePrice(
-      'BUY',
+      side,
       params.ltpPaise,
-      params.bestAskPaise,
+      side === 'BUY' ? params.bestAskPaise : params.bestBidPaise,
       params.pricingBuffer
     );
 
@@ -125,10 +155,11 @@ export class OrderManager {
       token: params.token,
       symbol: params.symbol,
       exchange: params.exchange,
-      side: 'BUY',
+      side,
       orderType: 'LMT',
       quantity: params.quantity,
       pricePaise: limitPricePaise,
+      product: params.product,
       priority: 'NORMAL',
     });
 
@@ -150,12 +181,14 @@ export class OrderManager {
     }
 
     // 4. Setup initial ladder position
-    const nextMilestone = params.nextMilestonePaise ?? fillPricePaise + params.stepSizePaise;
+    const nextMilestone = params.nextMilestonePaise ??
+      fillPricePaise + (side === 'BUY' ? 1 : -1) * params.stepSizePaise;
     const position: LadderPosition = {
       token: params.token,
       symbol: params.symbol,
       exchange: params.exchange,
-      side: 'BUY',
+      side,
+      product: params.product ?? 'I',
       quantity: params.quantity,
       entryPricePaise: fillPricePaise,
       nextMilestonePaise: nextMilestone,
@@ -179,11 +212,12 @@ export class OrderManager {
         token: params.token,
         symbol: params.symbol,
         exchange: params.exchange,
-        side: 'SELL',
+        side: side === 'BUY' ? 'SELL' : 'BUY',
         orderType: 'SL-LMT',
         quantity: params.quantity,
         pricePaise: params.initialSlLimitPaise,
         triggerPricePaise: params.initialSlTriggerPaise,
+        product: params.product,
         priority: 'NORMAL',
       });
       position.activeSlOrderId = slResult.orderId;
@@ -249,7 +283,7 @@ export class OrderManager {
     await this.stateStore.updatePositionStatus(token, 'CLOSED');
 
     const exitPrice = exitRes.filledPricePaise ?? pos.entryPricePaise;
-    const pnlPaise = (exitPrice - pos.entryPricePaise) * pos.quantity;
+    const pnlPaise = (exitPrice - pos.entryPricePaise) * pos.quantity * (pos.side === 'BUY' ? 1 : -1);
     this.riskGuard.recordRealizedPnl(pnlPaise);
 
     await this.stateStore.recordClosedTrade({

@@ -15,8 +15,8 @@ import type { SqliteStateStore } from '../persistence/SqliteStateStore.js';
 import type { BrokerPort } from '../../domain/ports/BrokerPort.js';
 import type { FlattradeWsAdapter } from '../broker/FlattradeWsAdapter.js';
 import { FlattradeOAuthError } from '../broker/FlattradeRestAdapter.js';
-import type { ClientWsHub } from './ClientWsHub.js';
-import { toPaise } from '../../domain/models/Money.js';
+import type { ClientWsHub, MarketDataSelection } from './ClientWsHub.js';
+import { roundDownToTick, roundUpToTick } from '../../domain/models/Money.js';
 
 export interface HttpServerConfig {
   tradingEnabled: boolean;
@@ -76,22 +76,52 @@ export const OptionChainQuerySchema = z.object({
 });
 
 function parseContractExpiry(tsym: string): string | null {
-  const match = tsym.match(/(\d{2})([A-Z]{3})(\d{2})(?=\d*(?:CE|PE|C|P)$)/i);
+  const match = tsym.match(/(\d{1,2})[\s-]*([A-Z]{3})[\s-]*(\d{2}|\d{4})(?=[\s-]*\d*(?:CE|PE|C|P)$)/i);
   if (!match) return null;
   const day = Number(match[1]);
   const monthName = match[2]!.toUpperCase();
-  const year = 2000 + Number(match[3]);
+  const yearText = match[3]!;
+  const year = yearText.length === 2 ? 2000 + Number(yearText) : Number(yearText);
   const months: Record<string, number> = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
   const month = months[monthName];
   if (month === undefined) return null;
+  const candidate = new Date(Date.UTC(year, month, day));
+  if (candidate.getUTCFullYear() !== year || candidate.getUTCMonth() !== month || candidate.getUTCDate() !== day) return null;
   return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 function parseContractStrike(tsym: string): number | null {
-  const match = tsym.match(/(?:\d{2}[A-Z]{3}\d{2}|\d{2}[A-Z]{3}\d{4})(\d+(?:\.\d+)?)?(?:CE|PE|C|P)$/i);
+  const match = tsym.match(/(?:\d{1,2}[\s-]*[A-Z]{3}[\s-]*(?:\d{2}|\d{4})[\s-]*)(\d+(?:\.\d+)?)[\s-]*(?:CE|PE|C|P)$/i);
   if (!match) return null;
   const strike = Number(match[1]);
   return Number.isFinite(strike) ? strike : null;
+}
+
+function normalizeContractExpiry(value: unknown, tradingSymbol: string): string | null {
+  if (typeof value === 'string') {
+    const text = value.trim().toUpperCase();
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+    if (iso) {
+      const parsed = new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])));
+      if (parsed.toISOString().slice(0, 10) === text) return text;
+    }
+    const dateMatch = /^(\d{1,2})[\s-]*([A-Z]{3})[\s-]*(\d{2}|\d{4})$/.exec(text);
+    if (dateMatch) {
+      const year = dateMatch[3]!.length === 2 ? `20${dateMatch[3]}` : dateMatch[3]!;
+      return parseContractExpiry(`${dateMatch[1]}${dateMatch[2]}${year}CE`);
+    }
+  }
+  return parseContractExpiry(tradingSymbol);
+}
+
+interface ResolvedOptionContract {
+  token: string;
+  symbol: string;
+  exchange: string;
+  expiry: string;
+  strike: number;
+  optionType: 'CE' | 'PE';
+  lotSize: number | null;
 }
 
 export class HttpServer {
@@ -104,6 +134,12 @@ export class HttpServer {
   private readonly stateStore: SqliteStateStore;
   private readonly broker: BrokerPort;
   private readonly wsHub?: ClientWsHub;
+  private readonly optionContracts = new Map<string, ResolvedOptionContract>();
+  private marketDataSelection: MarketDataSelection | null = null;
+  private optionChainResolution: { status: 'UNRESOLVED' | 'RESOLVED' | 'FAILED'; reason: string | null } = {
+    status: 'UNRESOLVED',
+    reason: null,
+  };
 
   constructor(
     config: HttpServerConfig,
@@ -179,6 +215,63 @@ export class HttpServer {
     return null;
   }
 
+  private getInstrumentQuoteState(instrumentId: string | null): 'READY' | 'STALE' | 'WAITING_FOR_TICK' | 'UNRESOLVED' {
+    if (!instrumentId) return 'UNRESOLVED';
+    if (!this.config.flattradeWsFeed?.isAuthenticatedConnection()) return 'WAITING_FOR_TICK';
+    const tick = this.config.flattradeWsFeed?.getLatestTick(instrumentId) ?? null;
+    if (!tick) return 'WAITING_FOR_TICK';
+    return Date.now() - tick.timestamp <= 3_000 ? 'READY' : 'STALE';
+  }
+
+  private async getMarketReadiness(): Promise<{
+    instrumentMaster: string;
+    spot: string;
+    spotResolutionFailure: string | null;
+    call: string;
+    put: string;
+    optionChain: string;
+    marketDataReady: boolean;
+    selection: MarketDataSelection | null;
+  }> {
+    let spotInstrumentId: string | null = this.marketDataSelection
+      ? `${this.marketDataSelection.spot.exchange}|${this.marketDataSelection.spot.token}`
+      : null;
+    let spotResolutionFailure: string | null = null;
+    if (!spotInstrumentId) {
+      try {
+        spotInstrumentId = await this.sessionService.getSensexSpotInstrumentId();
+      } catch (error) {
+        spotInstrumentId = null;
+        spotResolutionFailure = error instanceof Error ? error.message : 'Unknown Flattrade index token resolution failure.';
+      }
+    }
+
+    const spot = this.getInstrumentQuoteState(spotInstrumentId);
+    const call = this.marketDataSelection
+      ? this.getInstrumentQuoteState(`${this.marketDataSelection.call.exchange}|${this.marketDataSelection.call.token}`)
+      : 'UNRESOLVED';
+    const put = this.marketDataSelection
+      ? this.getInstrumentQuoteState(`${this.marketDataSelection.put.exchange}|${this.marketDataSelection.put.token}`)
+      : 'UNRESOLVED';
+    const optionChain = this.marketDataSelection
+      ? (call === 'READY' && put === 'READY' ? 'READY' : call === 'STALE' || put === 'STALE' ? 'STALE' : 'WAITING_FOR_QUOTES')
+      : this.optionChainResolution.status;
+
+    return {
+      instrumentMaster: this.optionChainResolution.status === 'RESOLVED'
+        ? 'FLATTRADE_GETOPTIONCHAIN'
+        : this.optionChainResolution.status,
+      spot,
+      spotResolutionFailure,
+      call,
+      put,
+      optionChain,
+      marketDataReady: spot === 'READY' && call === 'READY' && put === 'READY' &&
+        !!this.config.flattradeWsFeed?.isAuthenticatedConnection(),
+      selection: this.marketDataSelection,
+    };
+  }
+
   private setupRoutes(): void {
     // -------------------------------------------------------------
     // Health Endpoints (Unauthenticated)
@@ -198,6 +291,7 @@ export class HttpServer {
       const issues: string[] = [];
 
       const sessionState = await this.sessionService.getSessionState();
+      const market = await this.getMarketReadiness();
       if (!sessionState.sessionValid) {
         issues.push(sessionState.sessionValidity === 'UNKNOWN'
           ? 'Broker session validity could not be confirmed'
@@ -213,16 +307,20 @@ export class HttpServer {
           issues.push(`Market WebSocket feed is ${feedState}`);
         } else if (!this.config.flattradeWsFeed.isAuthenticatedConnection()) {
           issues.push('Market WebSocket broker authentication is not confirmed');
-        } else if (!this.config.flattradeWsFeed.isMarketDataReady()) {
-          issues.push('Market WebSocket subscriptions have not produced fresh ticks');
         }
       }
 
-      // No official BFO instrument-master URL/schema has been verified yet.
-      // Keep all option and order readiness false until validated contracts and
-      // independently fresh spot/CE/PE quotes are available.
-      issues.push('Authoritative BFO instrument master is unavailable');
-      issues.push('SENSEX spot, CE, and PE quote readiness is unavailable');
+      if (market.instrumentMaster !== 'FLATTRADE_GETOPTIONCHAIN') {
+        issues.push(this.optionChainResolution.reason ?? 'Flattrade option contracts have not been resolved.');
+      }
+      if (market.spot !== 'READY') {
+        issues.push(market.spotResolutionFailure ?? `SENSEX spot quote is ${market.spot}.`);
+      }
+      if (market.selection) {
+        if (market.call !== 'READY') issues.push(`ATM CE quote is ${market.call}.`);
+        if (market.put !== 'READY') issues.push(`ATM PE quote is ${market.put}.`);
+      }
+      if (market.optionChain !== 'READY') issues.push(`SENSEX option-chain quote readiness is ${market.optionChain}.`);
       if (!this.config.tradingEnabled) issues.push('Live order execution is disabled by configuration');
 
       // Check reconciliation state
@@ -240,13 +338,15 @@ export class HttpServer {
             brokerSession: sessionState.sessionValidity,
             websocketTransport: this.config.flattradeWsFeed?.isTransportConnected() ? 'CONNECTED' : 'DISCONNECTED',
             websocketAuthentication: this.config.flattradeWsFeed?.isAuthenticatedConnection() ? 'AUTHENTICATED' : 'UNAUTHENTICATED',
-            instrumentMaster: 'UNAVAILABLE',
-            sensexSpot: 'UNAVAILABLE',
-            callOption: 'UNAVAILABLE',
-            putOption: 'UNAVAILABLE',
-            optionChain: 'UNAVAILABLE',
+            instrumentMaster: market.instrumentMaster,
+            sensexSpot: market.spot,
+            callOption: market.call,
+            putOption: market.put,
+            optionChain: market.optionChain,
+            marketDataReady: market.marketDataReady,
             trading: this.config.tradingEnabled ? 'CONFIGURED_BUT_NOT_READY' : 'DISABLED',
           },
+          failureReason: this.optionChainResolution.reason,
           issues,
           timestamp: new Date().toISOString(),
         };
@@ -257,6 +357,7 @@ export class HttpServer {
         environment: 'LIVE',
         ready: true,
         tradingReady: false,
+        marketDataReady: market.marketDataReady,
         timestamp: new Date().toISOString(),
       };
     });
@@ -268,6 +369,7 @@ export class HttpServer {
       const openPositions = this.engine.getAllPositions().filter((p) => p.status === 'OPEN');
       const memoryUsage = process.memoryUsage();
       const sessionState = await this.sessionService.getSessionState();
+      const market = await this.getMarketReadiness();
 
       // A stored token is session state, not proof of broker connectivity.
       const brokerConnected = sessionState.sessionValid && !!this.config.flattradeWsFeed?.isAuthenticatedConnection();
@@ -284,7 +386,7 @@ export class HttpServer {
         sessionValid: sessionState.sessionValid,
         sessionValidity: sessionState.sessionValidity,
         wsFeedStatus,
-        wsFeedHealthy: sessionState.sessionValid && !!this.config.flattradeWsFeed?.isMarketDataReady(),
+        wsFeedHealthy: sessionState.sessionValid && market.marketDataReady,
         accountStateUncertain: this.reconciler.isAccountStateUncertain,
         openPositionsCount: openPositions.length,
         memoryRssMb: Math.round(memoryUsage.rss / (1024 * 1024)),
@@ -375,12 +477,13 @@ export class HttpServer {
     // Flattrade Authentication & Session Status Endpoint
     this.app.get('/api/auth/status', async () => {
       const sessionState = await this.sessionService.getSessionState();
+      const market = await this.getMarketReadiness();
       const sessionValid = sessionState.sessionValid;
       const wsFeed = this.config.flattradeWsFeed;
       const wsFeedStatus = wsFeed?.getConnectionState() ?? 'DISCONNECTED';
       const wsTransportConnected = !!wsFeed?.isTransportConnected();
       const wsAuthenticated = !!wsFeed?.isAuthenticatedConnection();
-      const marketDataReady = sessionValid && wsTransportConnected && wsAuthenticated && !!wsFeed?.isMarketDataReady();
+      const marketDataReady = sessionValid && wsTransportConnected && wsAuthenticated && market.marketDataReady;
       const brokerConnected = sessionValid && wsAuthenticated;
       const wsFeedHealthy = marketDataReady;
 
@@ -421,13 +524,22 @@ export class HttpServer {
       let instrumentId: string;
       try {
         instrumentId = await this.sessionService.getSensexSpotInstrumentId();
-      } catch {
+        await this.config.flattradeWsFeed?.subscribe([instrumentId]);
+      } catch (error) {
         reply.code(503);
-        return { index: 'SENSEX', exchange: 'BSE', status: 'INSTRUMENT_UNAVAILABLE', spotLtpPaise: null, timestamp: null };
+        return {
+          index: 'SENSEX',
+          exchange: 'BSE',
+          status: 'INSTRUMENT_UNAVAILABLE',
+          spotLtpPaise: null,
+          timestamp: null,
+          error: error instanceof Error ? error.message : 'Flattrade SENSEX index resolution failed.',
+        };
       }
       const tick = this.config.flattradeWsFeed?.getLatestTick(instrumentId) ?? null;
       const ageMs = tick ? Math.max(0, Date.now() - tick.timestamp) : null;
-      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000;
+      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000 &&
+        !!this.config.flattradeWsFeed?.isAuthenticatedConnection();
       return {
         index: 'SENSEX',
         exchange: 'BSE',
@@ -460,7 +572,8 @@ export class HttpServer {
       }
       const tick = this.config.flattradeWsFeed?.getLatestTick(instrumentId) ?? null;
       const ageMs = tick ? Math.max(0, Date.now() - tick.timestamp) : null;
-      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000;
+      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000 &&
+        !!this.config.flattradeWsFeed?.isAuthenticatedConnection();
       return {
         index: symbol,
         exchange: symbol === 'SENSEX' ? 'BSE' : 'NSE',
@@ -484,139 +597,260 @@ export class HttpServer {
 
       const symbol = parsed.data.symbol.toUpperCase();
       const exch = parsed.data.exchange ?? (symbol === 'SENSEX' || symbol === 'BANKEX' ? 'BFO' : 'NFO');
+      const fail = (statusCode: number, message: string) => {
+        this.optionChainResolution = { status: 'FAILED', reason: message };
+        this.optionContracts.clear();
+        this.marketDataSelection = null;
+        this.wsHub?.setMarketDataSelection(null);
+        reply.code(statusCode);
+        return { error: message };
+      };
 
       let spotInstrumentId: string;
       try {
         spotInstrumentId = await this.sessionService.getIndexSpotInstrumentId(symbol);
-        await this.config.flattradeWsFeed?.subscribe([spotInstrumentId]);
-      } catch {
-        reply.code(503);
-        return { error: `Live ${exch} instrument resolution is unavailable for ${symbol}.` };
+        if (!this.config.flattradeWsFeed) {
+          return fail(503, 'Flattrade market WebSocket feed is not configured.');
+        }
+        await this.config.flattradeWsFeed.subscribe([spotInstrumentId]);
+      } catch (error) {
+        return fail(503, `Flattrade ${symbol} index token resolution failed: ${error instanceof Error ? error.message : 'unknown failure'}`);
       }
 
       const spotTick = this.config.flattradeWsFeed?.getLatestTick(spotInstrumentId) ?? null;
       const spotAgeMs = spotTick ? Date.now() - spotTick.timestamp : null;
       if (!spotTick || spotAgeMs === null || spotAgeMs > 3000 || !spotTick.ltpPaise) {
-        reply.code(503);
-        return { error: `Live ${symbol} spot is unavailable or stale.` };
+        return fail(503, `Fresh ${symbol} spot tick is unavailable${spotTick ? ' (stale)' : ' (waiting for first tick)'}.`);
       }
 
       const spotRupees = (spotTick.ltpPaise / 100).toFixed(2);
       let rawChain: unknown;
       try {
-        rawChain = await this.broker.getOptionChain!(exch, symbol, spotRupees, parsed.data.strikes);
+        if (!this.broker.getOptionChain) {
+          return fail(503, 'Broker adapter does not implement Flattrade GetOptionChain.');
+        }
+        rawChain = await this.broker.getOptionChain(exch, symbol, spotRupees, parsed.data.strikes);
       } catch (error) {
-        reply.code(502);
-        return { error: 'Flattrade option-chain request failed.', message: error instanceof Error ? error.message : undefined };
+        return fail(502, `Flattrade GetOptionChain request failed: ${error instanceof Error ? error.message : 'unknown failure'}`);
       }
       if (!rawChain || typeof rawChain !== 'object') {
-        reply.code(503);
-        return { error: 'Flattrade returned no authoritative option contracts.' };
+        return fail(503, 'Flattrade GetOptionChain returned no contract response.');
       }
-      const chain = rawChain as { stat?: string; values?: unknown[] };
+      const chain = rawChain as { stat?: string; values?: unknown[]; emsg?: string };
       if (chain.stat !== 'Ok' || !Array.isArray(chain.values)) {
-        reply.code(503);
-        return { error: 'Flattrade returned no authoritative option contracts.' };
+        return fail(503, `Flattrade GetOptionChain returned ${chain.stat ?? 'an invalid response'}; verify broker session, exchange and underlying symbol.`);
       }
 
-      const contracts = chain.values.flatMap((value) => {
+      const contracts: ResolvedOptionContract[] = chain.values.flatMap((value) => {
         if (!value || typeof value !== 'object') return [];
         const item = value as Record<string, unknown>;
-        const tsym = typeof item.tsym === 'string' ? item.tsym : '';
-        const token = typeof item.token === 'string' ? item.token : '';
-        const expiry = typeof item.exd === 'string'
-          ? item.exd
-          : parseContractExpiry(tsym);
-        const strike = typeof item.strprc === 'string' || typeof item.strprc === 'number'
+        const tsym = typeof item.tsym === 'string' ? item.tsym.trim() : '';
+        const token = typeof item.token === 'string'
+          ? item.token.trim()
+          : typeof item.token === 'number' && Number.isSafeInteger(item.token) && item.token > 0
+            ? String(item.token)
+            : '';
+        const expiry = normalizeContractExpiry(item.exd, tsym);
+        const parsedStrike = typeof item.strprc === 'string' || typeof item.strprc === 'number'
           ? Number(item.strprc)
           : parseContractStrike(tsym);
-        const optionType = typeof item.optt === 'string'
-          ? item.optt.toUpperCase()
-          : tsym.endsWith('CE') || tsym.endsWith('C') ? 'CE' : tsym.endsWith('PE') || tsym.endsWith('P') ? 'PE' : '';
-        if (!tsym || !token || !expiry || !Number.isFinite(strike)) return [];
-        return [{ tsym, token, expiry, strike, optionType, lotSize: Number(item.ls ?? 0), tickSize: Number(item.ti ?? 0) }];
+          const strike = typeof parsedStrike === 'number' && Number.isFinite(parsedStrike) ? parsedStrike : null;
+        const optionCode = typeof item.optt === 'string' ? item.optt.trim().toUpperCase() : '';
+        const optionType = optionCode === 'CE' || optionCode === 'C'
+          ? 'CE'
+          : optionCode === 'PE' || optionCode === 'P'
+            ? 'PE'
+            : tsym.endsWith('CE') || tsym.endsWith('C')
+              ? 'CE'
+              : tsym.endsWith('PE') || tsym.endsWith('P')
+                ? 'PE'
+                : null;
+        const lotSizeRaw = typeof item.ls === 'string' || typeof item.ls === 'number' ? Number(item.ls) : NaN;
+        const lotSize = Number.isSafeInteger(lotSizeRaw) && lotSizeRaw > 0 ? lotSizeRaw : null;
+        if (!tsym || !token || !expiry || strike === null || strike <= 0 || !optionType) return [];
+        return [{ symbol: tsym, token, exchange: exch, expiry, strike, optionType, lotSize }];
       });
 
       if (!contracts.length) {
-        reply.code(503);
-        return { error: 'Flattrade option-chain response contained no valid dated contracts.' };
+        return fail(503, 'Flattrade GetOptionChain returned no contracts with valid symbol, token, expiry, strike and option side fields.');
       }
       const today = getTodayDateIST();
       const expiries = [...new Set(contracts.map((contract) => contract.expiry))]
         .filter((expiry) => expiry >= today)
         .sort();
       if (!expiries.length) {
-        reply.code(503);
-        return { error: 'Flattrade option-chain response contained no future expiry.' };
+        return fail(503, 'Flattrade GetOptionChain returned no contracts with a valid future expiry.');
       }
       const selectedExpiry = parsed.data.expiry && expiries.includes(parsed.data.expiry)
         ? parsed.data.expiry
         : expiries[0]!;
       const selectedContracts = contracts.filter((contract) => contract.expiry === selectedExpiry);
-      const strikes = [...new Set(selectedContracts.map((contract) => contract.strike).filter((strike): strike is number => Number.isFinite(strike)))]
+      const contractsByStrike = new Map<number, { call?: ResolvedOptionContract; put?: ResolvedOptionContract }>();
+      for (const contract of selectedContracts) {
+        const pair = contractsByStrike.get(contract.strike) ?? {};
+        if (contract.optionType === 'CE') pair.call = contract;
+        else pair.put = contract;
+        contractsByStrike.set(contract.strike, pair);
+      }
+      const pairedStrikes = [...contractsByStrike.entries()]
+        .filter(([, pair]) => pair.call && pair.put)
+        .map(([strike]) => strike)
         .sort((a, b) => a - b);
-      if (!strikes.length) {
-        reply.code(503);
-        return { error: 'No contracts were found for the selected expiry.' };
+      if (!pairedStrikes.length) {
+        return fail(503, `Flattrade returned no complete CE/PE pair for selected expiry ${selectedExpiry}.`);
       }
       const spotRupeesNumber = spotTick.ltpPaise / 100;
-      const atmStrike = strikes.reduce<number>((nearest, strike) =>
+      const atmStrike = pairedStrikes.reduce<number>((nearest, strike) =>
         Math.abs(strike - spotRupeesNumber) < Math.abs(nearest - spotRupeesNumber) ? strike : nearest
-      , strikes[0] as number);
+      , pairedStrikes[0]!);
 
-      const optionIds: string[] = [];
-      const strikeDtos = await Promise.all(strikes.map(async (strike) => {
-        const ce = selectedContracts.find((contract) => contract.strike === strike && contract.optionType === 'CE');
-        const pe = selectedContracts.find((contract) => contract.strike === strike && contract.optionType === 'PE');
-        if (ce) optionIds.push(`${exch}|${ce.token}`);
-        if (pe) optionIds.push(`${exch}|${pe.token}`);
-        let ceLtpPaise = ce ? this.config.flattradeWsFeed?.getLatestTick(`${exch}|${ce.token}`)?.ltpPaise : null;
-        let peLtpPaise = pe ? this.config.flattradeWsFeed?.getLatestTick(`${exch}|${pe.token}`)?.ltpPaise : null;
-        if (ce && ceLtpPaise == null) {
-          try {
-            const quote = await this.broker.getQuotes(exch, ce.token);
-            ceLtpPaise = quote.stat === 'Ok' && quote.lp ? toPaise(quote.lp) : null;
-          } catch {}
-        }
-        if (pe && peLtpPaise == null) {
-          try {
-            const quote = await this.broker.getQuotes(exch, pe.token);
-            peLtpPaise = quote.stat === 'Ok' && quote.lp ? toPaise(quote.lp) : null;
-          } catch {}
-        }
-        return {
-          strikePrice: strike,
-          ceToken: ce?.token ?? null,
-          ceSymbol: ce?.tsym ?? null,
-          ceLtpPaise,
-          peToken: pe?.token ?? null,
-          peSymbol: pe?.tsym ?? null,
-          peLtpPaise,
-        };
-      }));
+      const optionIds = selectedContracts.map((contract) => `${exch}|${contract.token}`);
+      const oldOptionIds = [...this.optionContracts.keys()];
 
-      if (optionIds.length && this.config.flattradeWsFeed) {
+      if (optionIds.length) {
         await this.config.flattradeWsFeed.subscribe(optionIds);
       }
+      const nextContracts = new Map(selectedContracts.map((contract) => [`${exch}|${contract.token}`, contract]));
+      const removedIds = oldOptionIds.filter((instrumentId) => !nextContracts.has(instrumentId));
+      if (removedIds.length) await this.config.flattradeWsFeed.unsubscribe(removedIds);
+      this.optionContracts.clear();
+      for (const [instrumentId, contract] of nextContracts) this.optionContracts.set(instrumentId, contract);
+
+      const atmPair = contractsByStrike.get(atmStrike)!;
+      const selection: MarketDataSelection = {
+        indexSymbol: symbol,
+        spot: { token: spotInstrumentId.split('|')[1]!, symbol, exchange: spotInstrumentId.split('|')[0]!, lotSize: null },
+        expiry: selectedExpiry,
+        atmStrike,
+        call: { token: atmPair.call!.token, symbol: atmPair.call!.symbol, exchange: exch, lotSize: atmPair.call!.lotSize },
+        put: { token: atmPair.put!.token, symbol: atmPair.put!.symbol, exchange: exch, lotSize: atmPair.put!.lotSize },
+        strikes: pairedStrikes.map((strike) => {
+          const pair = contractsByStrike.get(strike)!;
+          return {
+            strikePrice: strike,
+            call: { token: pair.call!.token, symbol: pair.call!.symbol, exchange: exch, lotSize: pair.call!.lotSize },
+            put: { token: pair.put!.token, symbol: pair.put!.symbol, exchange: exch, lotSize: pair.put!.lotSize },
+          };
+        }),
+      };
+      this.marketDataSelection = selection;
+      this.optionChainResolution = { status: 'RESOLVED', reason: null };
+      this.wsHub?.setMarketDataSelection(selection);
+
+      const strikeDtos = selection.strikes.map((strike) => {
+        const freshTick = (contract: { token: string } | null) => {
+          if (!contract) return null;
+          const tick = this.config.flattradeWsFeed?.getLatestTick(`${exch}|${contract.token}`) ?? null;
+          return tick && Date.now() - tick.timestamp <= 3_000 &&
+            this.config.flattradeWsFeed?.isAuthenticatedConnection()
+            ? { ltpPaise: tick.ltpPaise, timestamp: tick.timestamp }
+            : null;
+        };
+        const ceTick = freshTick(strike.call);
+        const peTick = freshTick(strike.put);
+        return {
+          strikePrice: strike.strikePrice,
+          ceToken: strike.call?.token ?? null,
+          ceSymbol: strike.call?.symbol ?? null,
+          ceLotSize: strike.call?.lotSize ?? null,
+          ceLtpPaise: ceTick?.ltpPaise ?? null,
+          ceTimestamp: ceTick?.timestamp ?? null,
+          peToken: strike.put?.token ?? null,
+          peSymbol: strike.put?.symbol ?? null,
+          peLotSize: strike.put?.lotSize ?? null,
+          peLtpPaise: peTick?.ltpPaise ?? null,
+          peTimestamp: peTick?.timestamp ?? null,
+        };
+      });
+      const market = await this.getMarketReadiness();
 
       return {
         symbol,
+        exchange: exch,
         expiry: selectedExpiry,
+        expiries,
         strikes: strikeDtos,
         atmStrike,
         dataSource: 'FLATTRADE_GETOPTIONCHAIN',
-        marketDataReady: !!this.config.flattradeWsFeed?.isAuthenticatedConnection(),
-        validation: 'CONTRACTS_FROM_FLATTRADE_GETOPTIONCHAIN_AND_LIVE_SPOT',
+        marketDataReady: market.marketDataReady,
+        validation: 'CONTRACTS_FROM_FLATTRADE_GETOPTIONCHAIN_AND_FRESH_WEBSOCKET_TICKS',
       };
     });
 
-    // 1-Click Order Execution — fail closed while authoritative contracts are unavailable
+    // One-click order entry requires a contract and price verified by this live broker session.
     this.app.post('/api/orders/one-click', async (request, reply) => {
-      const blocked = this.tradingBlockedReason();
-      if (blocked) return reply.code(403).send({ error: blocked });
       const parsed = OneClickOrderSchema.safeParse(request.body);
       if (!parsed.success) return reply.code(400).send({ error: 'Validation failed', details: parsed.error.issues });
-      return reply.code(503).send({ error: 'Order entry is unavailable until authoritative instrument validation and live quote readiness are implemented.' });
+
+      const blocked = this.tradingBlockedReason();
+      if (blocked) return reply.code(403).send({ error: blocked });
+
+      const order = parsed.data;
+      const instrumentId = `${order.exchange}|${order.token}`;
+      const contract = this.optionContracts.get(instrumentId);
+      if (!contract || contract.symbol !== order.tradingSymbol) {
+        return reply.code(422).send({ error: 'Selected token, trading symbol and exchange do not match a Flattrade-resolved option contract.' });
+      }
+      if (contract.lotSize === null || contract.lotSize !== order.lotSize) {
+        return reply.code(422).send({ error: 'Requested lot size does not match Flattrade contract metadata.' });
+      }
+      if (!order.ladderConfig || !order.initialSlPoints) {
+        return reply.code(400).send({ error: 'ladderConfig and a positive initialSlPoints are required for a protected entry.' });
+      }
+      const quantity = order.lots * contract.lotSize;
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+        return reply.code(400).send({ error: 'Requested order quantity is outside the supported integer range.' });
+      }
+
+      const sessionState = await this.sessionService.getSessionState();
+      if (!sessionState.sessionValid || !this.config.flattradeWsFeed?.isAuthenticatedConnection()) {
+        return reply.code(503).send({ error: 'Flattrade session or authenticated market-data WebSocket is unavailable.' });
+      }
+      const tick = this.config.flattradeWsFeed.getLatestTick(instrumentId);
+      if (!tick || Date.now() - tick.timestamp > 3_000 || tick.ltpPaise <= 0) {
+        return reply.code(503).send({ error: 'Selected option has no fresh Flattrade WebSocket tick; order entry is blocked.' });
+      }
+
+      const ladder = order.ladderConfig;
+      const slDistancePaise = Math.round(order.initialSlPoints * 100);
+      const slTrigger = order.side === 'BUY'
+        ? roundDownToTick(tick.ltpPaise - slDistancePaise)
+        : roundUpToTick(tick.ltpPaise + slDistancePaise);
+      if (slTrigger <= 0) return reply.code(422).send({ error: 'Initial stop-loss distance is invalid for the selected live price.' });
+      const slLimit = order.side === 'BUY'
+        ? roundDownToTick(slTrigger - ladder.slippageBufferPaise)
+        : roundUpToTick(slTrigger + ladder.slippageBufferPaise);
+      const firstMilestone = ladder.firstMilestonePaise ?? (
+        tick.ltpPaise + (order.side === 'BUY' ? 1 : -1) * ladder.stepSizePaise
+      );
+      if ((order.side === 'BUY' && firstMilestone <= tick.ltpPaise) ||
+        (order.side === 'SELL' && firstMilestone >= tick.ltpPaise)) {
+        return reply.code(422).send({ error: 'First target must be beyond the live price in the selected order direction.' });
+      }
+
+      try {
+        const position = await this.orderManager.enterPosition({
+          commandId: order.commandId,
+          token: contract.token,
+          symbol: contract.symbol,
+          exchange: contract.exchange,
+          side: order.side,
+          product: order.product,
+          quantity,
+          ltpPaise: tick.ltpPaise,
+          bestAskPaise: tick.bestAskPaise,
+          bestBidPaise: tick.bestBidPaise,
+          stepSizePaise: ladder.stepSizePaise,
+          breakoutBufferPaise: ladder.breakoutBufferPaise,
+          slippageBufferPaise: ladder.slippageBufferPaise,
+          nextMilestonePaise: firstMilestone,
+          initialSlTriggerPaise: slTrigger,
+          initialSlLimitPaise: slLimit,
+        });
+        return position;
+      } catch (error) {
+        return reply.code(422).send({ error: error instanceof Error ? error.message : 'Order entry failed.' });
+      }
     });
 
     // Live Edit Ladder Milestone & Buffers
