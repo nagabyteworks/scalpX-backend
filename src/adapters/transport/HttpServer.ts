@@ -26,6 +26,7 @@ import {
   FlattradeContractMasterError,
   FlattradeOAuthError,
 } from '../broker/FlattradeRestAdapter.js';
+import type { FlattradeIndexListDiagnostics } from '../broker/FlattradeRestAdapter.js';
 import type {
   FlattradeDerivativesExchange,
   FlattradeIndexOptionContract,
@@ -943,6 +944,7 @@ export class HttpServer {
           exchange,
           instrumentId,
           code: failure.code,
+          diagnostics: failure.diagnostics,
         },
         'Flattrade index market data is unavailable'
       );
@@ -1014,6 +1016,7 @@ export class HttpServer {
     code: string;
     message: string;
     statusCode: number;
+    diagnostics?: FlattradeIndexListDiagnostics;
   } {
     if (!(error instanceof IndexResolutionError)) {
       return {
@@ -1029,13 +1032,19 @@ export class HttpServer {
         : error.code === 'BROKER_API_FAILURE' || error.code === 'INVALID_INDEX_RESPONSE'
           ? 502
           : 503;
-    return { code: error.code, message: error.message, statusCode };
+    return {
+      code: error.code,
+      message: error.message,
+      statusCode,
+      diagnostics: error.diagnostics,
+    };
   }
 
   private marketDataWaitFailure(error: unknown): {
     code: string;
     message: string;
     statusCode: number;
+    diagnostics?: FlattradeIndexListDiagnostics;
   } {
     if (error instanceof MarketDataWaitError) {
       const statusCode = error.code === 'SUBSCRIPTION_REJECTED' ? 502 : 503;

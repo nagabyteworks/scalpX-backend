@@ -26,6 +26,26 @@ option contracts from Flattrade's daily index-derivatives Scrip Master:
 - NFO: `https://flattrade.s3.ap-south-1.amazonaws.com/scripmaster/Nfo_Index_Derivatives.csv`
 - BFO: `https://flattrade.s3.ap-south-1.amazonaws.com/scripmaster/Bfo_Index_Derivatives.csv`
 
+`GetIndexList` is sent as `POST /GetIndexList` with `jData` containing exactly
+the logged-in `uid` and requested `exch` (`NSE` or `BSE`), plus the current
+session token as form-encoded `jKey`. This matches Flattrade's published
+[Market Info API documentation](https://pi.flattrade.in/docs) and its
+[GetIndexList reference](https://github.com/marketcalls/broker-api-docs/blob/master/flattrade-api-docs/06-market-info.md#get-index-list).
+The response's `stat`, `values` and `emsg` are checked explicitly: `stat` must
+be `Ok` and `values` must be an array. An empty array remains a valid response
+and resolves to `INDEX_NOT_FOUND` if the requested index is absent.
+
+On request/response failure, backend logs include the endpoint, HTTP status,
+sanitized broker `stat`/`emsg`, whether a session token was present, the
+independent read-only `/Limits` session validation (`VALID`, `INVALID` or
+`UNKNOWN`), request duration, exchange and failure kind. The log does not
+include request or response bodies, credentials, OAuth codes, TOTP, or session
+tokens. A rejection is classified as `BROKER_SESSION_UNAVAILABLE` only when
+`/Limits` confirms `INVALID` or no session token exists; an unavailable
+validation remains `UNKNOWN` and does not imply an expired session. Diagnostic
+details are for backend logs only and are not included in public market-data
+error payloads. The backend never starts OAuth automatically.
+
 The backend validates the master header and each index-option row, then uses its
 `Exchange`, `Token`, `Lotsize`, `Symbol`, `Tradingsymbol`, `Instrument`,
 `Expiry`, `Strike`, and `Optiontype` columns. It accepts only the requested

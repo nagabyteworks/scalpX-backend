@@ -48,6 +48,19 @@ tokens, normalizes index names, and requires an unambiguous exact alias on the
 requested exchange (`NIFTY`/`NIFTY 50` on NSE and `SENSEX` on BSE). It does not
 contain guessed index or option tokens.
 
+The index request follows Flattrade's documented `POST /GetIndexList`
+contract: `jData` contains the logged-in `uid` and `NSE`/`BSE` exchange, and
+the current session token is sent separately as form-encoded `jKey`. The
+backend checks the HTTP response, JSON object, `stat`, and `values` array
+without converting an empty list into a success-shaped price. On failures it
+logs sanitized broker status/message, endpoint, exchange, HTTP status, duration,
+token-presence flag, and independently validated session state (`VALID`,
+`INVALID`, or `UNKNOWN`). `/Limits` is read-only and is used before assigning
+an invalid-session error; an unknown validation result remains unknown. Bodies,
+credentials, OAuth codes, TOTP and tokens are never logged, and detailed
+diagnostics are not exposed in the public API response. See the [API contract](docs/api-contract.md)
+and [Flattrade GetIndexList documentation](https://github.com/marketcalls/broker-api-docs/blob/master/flattrade-api-docs/06-market-info.md#get-index-list).
+
 Android requests `/api/market-data/index?symbol=SENSEX` (or `NIFTY`). The backend
 subscribes to the resolved index instrument and waits for the first fresh tick
 using an event-driven waiter. The timeout is controlled by

@@ -169,6 +169,26 @@ export type FlattradeIndexListErrorCode =
   | 'BROKER_API_FAILURE'
   | 'INVALID_INDEX_RESPONSE';
 
+export interface FlattradeIndexListDiagnostics {
+  endpoint: string;
+  httpStatus: number | null;
+  stat: string | null;
+  emsg: string | null;
+  sessionTokenPresent: boolean;
+  sessionValidation: 'VALID' | 'INVALID' | 'UNKNOWN';
+  requestDurationMs: number;
+  exchange: 'NSE' | 'BSE';
+  failureKind:
+    | 'MISSING_SESSION_TOKEN'
+    | 'NETWORK'
+    | 'RESPONSE_READ'
+    | 'INVALID_JSON'
+    | 'HTTP_ERROR'
+    | 'BROKER_REJECTION'
+    | 'INVALID_RESPONSE'
+    | null;
+}
+
 export class FlattradeContractMasterError extends Error {
   constructor(
     readonly code: 'CONTRACT_MASTER_UNAVAILABLE' | 'INVALID_CONTRACT_MASTER',
@@ -180,9 +200,25 @@ export class FlattradeContractMasterError extends Error {
 }
 
 export class FlattradeIndexListError extends Error {
-  constructor(readonly code: FlattradeIndexListErrorCode, message: string) {
+  constructor(
+    readonly code: FlattradeIndexListErrorCode,
+    message: string,
+    readonly diagnostics: FlattradeIndexListDiagnostics
+  ) {
     super(message);
     this.name = 'FlattradeIndexListError';
+  }
+}
+
+type FlattradeRequestFailureKind = 'MISSING_SESSION_TOKEN' | 'NETWORK' | 'RESPONSE_READ' | 'INVALID_JSON';
+
+class FlattradeRequestError extends Error {
+  constructor(
+    readonly failureKind: FlattradeRequestFailureKind,
+    readonly httpStatus: number | null = null
+  ) {
+    super('Flattrade request failed.');
+    this.name = 'FlattradeRequestError';
   }
 }
 
@@ -196,7 +232,7 @@ function sanitizeBrokerMessage(message: unknown, secrets: string[]): string | nu
   for (const secret of secrets) {
     if (secret) safe = safe.split(secret).join('[REDACTED]');
   }
-  safe = safe.replace(/\b(request[_ -]?code|api[_ -]?(?:key|secret)|access[_ -]?token|session[_ -]?token|token|jkey|authorization)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]');
+  safe = safe.replace(/\b(request[_ -]?code|api[_ -]?(?:key|secret)|access[_ -]?token|session[_ -]?token|token|jkey|authorization|totp|otp)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]');
   safe = safe.replace(/\b[A-Za-z0-9_-]*token[A-Za-z0-9_-]*\b/gi, '[REDACTED]');
   safe = safe.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]');
   return safe.slice(0, 200) || null;
@@ -334,6 +370,45 @@ export class FlattradeRestAdapter implements BrokerPort {
     } catch {
       // Broker error bodies are untrusted and can echo submitted credentials or jKey.
       throw new Error('Flattrade returned an invalid response');
+    }
+  }
+
+  private async postFormWithStatus<T>(
+    endpoint: string,
+    jData: Record<string, unknown>
+  ): Promise<{ httpStatus: number; data: T }> {
+    if (!this.sessionToken) {
+      throw new FlattradeRequestError('MISSING_SESSION_TOKEN');
+    }
+
+    const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`;
+    const formBody = `jData=${encodeURIComponent(JSON.stringify(jData))}&jKey=${encodeURIComponent(this.sessionToken)}`;
+    let response: Awaited<ReturnType<typeof request>>;
+    try {
+      response = await request(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: formBody,
+        dispatcher: this.dispatcher,
+      });
+    } catch {
+      throw new FlattradeRequestError('NETWORK');
+    }
+
+    let responseText: string;
+    try {
+      responseText = await response.body.text();
+    } catch {
+      throw new FlattradeRequestError('RESPONSE_READ', response.statusCode);
+    }
+
+    try {
+      return {
+        httpStatus: response.statusCode,
+        data: JSON.parse(responseText) as T,
+      };
+    } catch {
+      throw new FlattradeRequestError('INVALID_JSON', response.statusCode);
     }
   }
 
@@ -490,39 +565,119 @@ export class FlattradeRestAdapter implements BrokerPort {
   }
 
   async getIndexList(exch: 'NSE' | 'BSE'): Promise<FlattradeIndexEntry[]> {
-    let response: { stat?: string; values?: unknown; emsg?: string };
+    const startedAt = Date.now();
+    const sessionTokenPresent = Boolean(this.sessionToken);
+    let httpStatus: number | null = null;
+    let stat: string | null = null;
+    let emsg: string | null = null;
+    let requestDurationMs = 0;
+    let failureKind: FlattradeIndexListDiagnostics['failureKind'] = null;
+    let response: { stat?: unknown; values?: unknown; emsg?: unknown };
     try {
-      response = await this.postForm<{ stat?: string; values?: unknown; emsg?: string }>(
+      const result = await this.postFormWithStatus<{ stat?: unknown; values?: unknown; emsg?: unknown }>(
         FLATTRADE_ENDPOINTS.GET_INDEX_LIST,
         { uid: this.config.userId, exch }
       );
+      httpStatus = result.httpStatus;
+      requestDurationMs = Date.now() - startedAt;
+      if (typeof result.data === 'object' && result.data !== null && !Array.isArray(result.data)) {
+        response = result.data;
+        stat = sanitizeBrokerMessage(response.stat, [
+          this.config.apiKey,
+          this.config.apiSecret,
+          this.sessionToken ?? '',
+        ]);
+        emsg = sanitizeBrokerMessage(response.emsg, [
+          this.config.apiKey,
+          this.config.apiSecret,
+          this.sessionToken ?? '',
+        ]);
+      } else {
+        failureKind = 'INVALID_RESPONSE';
+        const sessionValidation = sessionTokenPresent ? await this.validateSession() : 'UNKNOWN';
+        const diagnostics = this.getIndexListDiagnostics(
+          exch,
+          httpStatus,
+          stat,
+          emsg,
+          sessionTokenPresent,
+          sessionValidation,
+          requestDurationMs,
+          failureKind
+        );
+        const sessionRejected = !sessionTokenPresent || sessionValidation === 'INVALID';
+        throw new FlattradeIndexListError(
+          sessionRejected ? 'BROKER_SESSION_UNAVAILABLE' : 'INVALID_INDEX_RESPONSE',
+          'Flattrade GetIndexList returned an invalid response.',
+          diagnostics
+        );
+      }
     } catch (error) {
-      const missingSession = error instanceof Error && /session token not initialized/i.test(error.message);
+      if (error instanceof FlattradeIndexListError) throw error;
+      requestDurationMs = Date.now() - startedAt;
+      failureKind = error instanceof FlattradeRequestError
+        ? error.failureKind
+        : 'NETWORK';
+      if (error instanceof FlattradeRequestError) httpStatus = error.httpStatus;
+      const sessionValidation = sessionTokenPresent ? await this.validateSession() : 'UNKNOWN';
+      const diagnostics = this.getIndexListDiagnostics(
+        exch,
+        httpStatus,
+        stat,
+        emsg,
+        sessionTokenPresent,
+        sessionValidation,
+        requestDurationMs,
+        failureKind
+      );
+      const sessionUnavailable = !sessionTokenPresent || sessionValidation === 'INVALID';
       throw new FlattradeIndexListError(
-        missingSession ? 'BROKER_SESSION_UNAVAILABLE' : 'BROKER_API_FAILURE',
-        missingSession
+        sessionUnavailable ? 'BROKER_SESSION_UNAVAILABLE' : 'BROKER_API_FAILURE',
+        sessionUnavailable
           ? 'Flattrade session is unavailable for GetIndexList.'
-          : 'Flattrade GetIndexList request failed.'
+          : 'Flattrade GetIndexList request failed.',
+        diagnostics
       );
     }
-    if (response.stat !== 'Ok') {
-      const brokerMessage = sanitizeBrokerMessage(response.emsg, [
-        this.config.apiKey,
-        this.config.apiSecret,
-        this.sessionToken ?? '',
-      ]);
-      const sessionRejected = /session expired|invalid session key|invalid session/i.test(brokerMessage ?? '');
+    if (httpStatus! < 200 || httpStatus! >= 300 || stat !== 'Ok') {
+      failureKind = httpStatus! < 200 || httpStatus! >= 300 ? 'HTTP_ERROR' : 'BROKER_REJECTION';
+      const sessionValidation = sessionTokenPresent ? await this.validateSession() : 'UNKNOWN';
+      const diagnostics = this.getIndexListDiagnostics(
+        exch,
+        httpStatus,
+        stat,
+        emsg,
+        sessionTokenPresent,
+        sessionValidation,
+        requestDurationMs,
+        failureKind
+      );
+      const sessionRejected = !sessionTokenPresent || sessionValidation === 'INVALID';
       throw new FlattradeIndexListError(
         sessionRejected ? 'BROKER_SESSION_UNAVAILABLE' : 'BROKER_API_FAILURE',
         sessionRejected
-          ? 'Flattrade rejected the index-list request; verify the broker session.'
-          : 'Flattrade GetIndexList returned an unsuccessful response.'
+          ? 'Flattrade session is unavailable for GetIndexList.'
+          : 'Flattrade GetIndexList returned an unsuccessful response.',
+        diagnostics
       );
     }
     if (!Array.isArray(response.values)) {
+      const sessionValidation = sessionTokenPresent ? await this.validateSession() : 'UNKNOWN';
+      const sessionRejected = !sessionTokenPresent || sessionValidation === 'INVALID';
+      const diagnostics = this.getIndexListDiagnostics(
+        exch,
+        httpStatus,
+        stat,
+        emsg,
+        sessionTokenPresent,
+        sessionValidation,
+        requestDurationMs,
+        'INVALID_RESPONSE'
+      );
       throw new FlattradeIndexListError(
-        'INVALID_INDEX_RESPONSE',
-        'Flattrade GetIndexList returned an invalid values field.'
+        sessionRejected ? 'BROKER_SESSION_UNAVAILABLE' : 'INVALID_INDEX_RESPONSE',
+        'Flattrade GetIndexList returned an invalid values field.',
+        diagnostics
       );
     }
     return response.values.flatMap((value): FlattradeIndexEntry[] => {
@@ -549,13 +704,40 @@ export class FlattradeRestAdapter implements BrokerPort {
     });
   }
 
+  private getIndexListDiagnostics(
+    exchange: 'NSE' | 'BSE',
+    httpStatus: number | null,
+    stat: string | null,
+    emsg: string | null,
+    sessionTokenPresent: boolean,
+    sessionValidation: 'VALID' | 'INVALID' | 'UNKNOWN',
+    requestDurationMs: number,
+    failureKind: FlattradeIndexListDiagnostics['failureKind']
+  ): FlattradeIndexListDiagnostics {
+    return {
+      endpoint: FLATTRADE_ENDPOINTS.GET_INDEX_LIST,
+      httpStatus,
+      stat,
+      emsg,
+      sessionTokenPresent,
+      sessionValidation,
+      requestDurationMs,
+      exchange,
+      failureKind,
+    };
+  }
+
   /** Validate the current jKey using Flattrade's documented read-only Limits API. */
   async validateSession(): Promise<'VALID' | 'INVALID' | 'UNKNOWN'> {
     try {
-      const response = await this.postForm<{ stat?: string; emsg?: string }>(FLATTRADE_ENDPOINTS.LIMITS, {
-        uid: this.config.userId,
-        actid: this.config.accountId ?? this.config.userId,
-      });
+      const { httpStatus, data: response } = await this.postFormWithStatus<{ stat?: string; emsg?: string }>(
+        FLATTRADE_ENDPOINTS.LIMITS,
+        {
+          uid: this.config.userId,
+          actid: this.config.accountId ?? this.config.userId,
+        }
+      );
+      if (httpStatus < 200 || httpStatus >= 300) return 'UNKNOWN';
       if (response.stat === 'Ok') return 'VALID';
       if (/session expired|invalid session key/i.test(response.emsg ?? '')) return 'INVALID';
       return 'UNKNOWN';

@@ -10,6 +10,10 @@ export interface MockServerOptions {
   sessionInvalid?: boolean;
   acknowledgeSubscriptions?: boolean;
   indexListResponse?: unknown;
+  indexListStatusCode?: number;
+  indexListRawBody?: string;
+  indexListNetworkFailure?: boolean;
+  limitsNetworkFailure?: boolean;
 }
 
 export class MockFlattradeServer {
@@ -20,7 +24,12 @@ export class MockFlattradeServer {
   public orderBook: FlattradeOrderBookItem[] = [];
   public positionBook: FlattradePosition[] = [];
   public orderSequence = 0;
-  public receivedRequests: Array<{ url: string; body: string }> = [];
+  public receivedRequests: Array<{
+    url: string;
+    method: string;
+    contentType: string | undefined;
+    body: string;
+  }> = [];
   public subscriptionMessages: string[] = [];
 
   private port = 0;
@@ -29,6 +38,10 @@ export class MockFlattradeServer {
   public acknowledgeSubscriptions: boolean;
   public expectedApiKey?: string;
   public indexListResponse?: unknown;
+  public indexListStatusCode: number;
+  public indexListRawBody?: string;
+  public indexListNetworkFailure: boolean;
+  public limitsNetworkFailure: boolean;
 
   constructor(options: MockServerOptions = {}) {
     this.sessionToken = options.sessionToken ?? 'MOCK_SESSION_TOKEN_ABC';
@@ -36,6 +49,10 @@ export class MockFlattradeServer {
     this.acknowledgeSubscriptions = options.acknowledgeSubscriptions ?? true;
     this.expectedApiKey = options.expectedApiKey;
     this.indexListResponse = options.indexListResponse;
+    this.indexListStatusCode = options.indexListStatusCode ?? 200;
+    this.indexListRawBody = options.indexListRawBody;
+    this.indexListNetworkFailure = options.indexListNetworkFailure ?? false;
+    this.limitsNetworkFailure = options.limitsNetworkFailure ?? false;
 
     this.httpServer = http.createServer((req, res) => {
       let body = '';
@@ -44,7 +61,12 @@ export class MockFlattradeServer {
       });
 
       req.on('end', () => {
-        this.receivedRequests.push({ url: req.url ?? '', body });
+        this.receivedRequests.push({
+          url: req.url ?? '',
+          method: req.method ?? '',
+          contentType: req.headers['content-type'],
+          body,
+        });
         this.handleHttp(req, res, body, options);
       });
     });
@@ -93,6 +115,10 @@ export class MockFlattradeServer {
     const url = req.url ?? '';
 
     if (url.endsWith('/Limits')) {
+      if (this.limitsNetworkFailure) {
+        res.destroy();
+        return;
+      }
       const suppliedToken = new URLSearchParams(body).get('jKey');
       const valid = !this.sessionInvalid && suppliedToken === this.sessionToken;
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -103,10 +129,18 @@ export class MockFlattradeServer {
     }
 
     if (url.endsWith('/GetIndexList')) {
+      if (this.indexListNetworkFailure) {
+        res.destroy();
+        return;
+      }
       const params = new URLSearchParams(body);
       const payload = params.get('jData');
       const requestData = payload ? JSON.parse(payload) as { exch?: string } : {};
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(this.indexListStatusCode, { 'Content-Type': 'application/json' });
+      if (this.indexListRawBody !== undefined) {
+        res.end(this.indexListRawBody);
+        return;
+      }
       // Test fixture only. This is deliberately not a production token or live-broker evidence.
       res.end(JSON.stringify(this.indexListResponse ?? (requestData.exch === 'BSE'
         ? { stat: 'Ok', values: [{ idxname: 'SENSEX', token: '987654321' }] }

@@ -10,6 +10,8 @@ import { getTodayDateIST, SessionService } from '../../src/application/SessionSe
 import { ReconcilerService } from '../../src/application/ReconcilerService.js';
 import type { MarketFeedPort } from '../../src/domain/ports/MarketFeedPort.js';
 import { MarketDataWaitError } from '../../src/adapters/broker/FlattradeWsAdapter.js';
+import { FlattradeIndexListError } from '../../src/adapters/broker/FlattradeRestAdapter.js';
+import type { FlattradeIndexListDiagnostics } from '../../src/adapters/broker/FlattradeRestAdapter.js';
 
 describe('HttpServer Transport Layer Integration', () => {
   const JWT_SECRET = 'TEST_JWT_SECRET_KEY_123456';
@@ -22,8 +24,10 @@ describe('HttpServer Transport Layer Integration', () => {
   let reconciler: ReconcilerService;
   let validToken: string;
   let baseUrl: string;
+  let logLines: string[];
 
   beforeEach(async () => {
+    logLines = [];
     stateStore = new SqliteStateStore(':memory:');
     broker = new MockBrokerAdapter();
     broker.processTick({ token: '26000', ltpPaise: 11005, timestamp: Date.now() });
@@ -51,6 +55,10 @@ describe('HttpServer Transport Layer Integration', () => {
       {
         jwtSecret: JWT_SECRET,
         tradingEnabled: false,
+        logger: {
+          level: 'warn',
+          stream: { write: (line: string) => logLines.push(line) },
+        },
       },
       sessionService,
       orderManager,
@@ -79,6 +87,52 @@ describe('HttpServer Transport Layer Integration', () => {
     expect(data.environment).toBe('LIVE');
     expect(data.tradingEnabled).toBe(false);
     expect(data.openPositionsCount).toBe(0);
+  });
+
+  it('logs sanitized GetIndexList diagnostics without exposing broker secrets to logs or API clients', async () => {
+    const diagnostics: FlattradeIndexListDiagnostics = {
+      endpoint: '/GetIndexList',
+      httpStatus: 503,
+      stat: 'Not_Ok',
+      emsg: 'Broker rejected request [REDACTED]',
+      sessionTokenPresent: true,
+      sessionValidation: 'VALID',
+      requestDurationMs: 17,
+      exchange: 'BSE',
+      failureKind: 'HTTP_ERROR',
+    };
+    const brokerWithIndexList = broker as unknown as {
+      getIndexList: () => Promise<never>;
+    };
+    brokerWithIndexList.getIndexList = async () => {
+      throw new FlattradeIndexListError(
+        'BROKER_API_FAILURE',
+        'Flattrade GetIndexList returned an unsuccessful response.',
+        diagnostics
+      );
+    };
+
+    const response = await fetch(`${baseUrl}/api/market-data/index?symbol=SENSEX`);
+    expect(response.status).toBe(502);
+    const payload = await response.json() as { error?: { code?: string } };
+    expect(payload.error?.code).toBe('BROKER_API_FAILURE');
+    expect(JSON.stringify(payload)).not.toContain('Broker rejected request');
+
+    const logOutput = logLines.join('');
+    expect(logOutput).toContain('"endpoint":"/GetIndexList"');
+    expect(logOutput).toContain('"httpStatus":503');
+    expect(logOutput).toContain('Broker rejected request [REDACTED]');
+    expect(logOutput).toContain('"sessionValidation":"VALID"');
+    expect(logOutput).toContain('"requestDurationMs":17');
+    for (const secret of [
+      'API_KEY_SHOULD_NOT_LOG',
+      'API_SECRET_SHOULD_NOT_LOG',
+      'SESSION_TOKEN_SHOULD_NOT_LOG',
+      'AUTH_CODE_SHOULD_NOT_LOG',
+      'TOTP_SHOULD_NOT_LOG',
+    ]) {
+      expect(logOutput).not.toContain(secret);
+    }
   });
 
   it('GET /api/auth/login-url is public for separate Flattrade browser OAuth', async () => {

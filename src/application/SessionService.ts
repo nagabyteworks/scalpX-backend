@@ -3,6 +3,7 @@ import {
   FlattradeOAuthError,
   type FlattradeRestAdapter,
 } from '../adapters/broker/FlattradeRestAdapter.js';
+import type { FlattradeIndexListDiagnostics } from '../adapters/broker/FlattradeRestAdapter.js';
 import type { StateStorePort } from '../domain/ports/StateStorePort.js';
 import type { FlattradeWsAdapter } from '../adapters/broker/FlattradeWsAdapter.js';
 import type { ReconcilerService } from './ReconcilerService.js';
@@ -43,7 +44,11 @@ export type IndexResolutionErrorCode =
   | 'UNSUPPORTED_INDEX';
 
 export class IndexResolutionError extends Error {
-  constructor(readonly code: IndexResolutionErrorCode, message: string) {
+  constructor(
+    readonly code: IndexResolutionErrorCode,
+    message: string,
+    readonly diagnostics?: FlattradeIndexListDiagnostics
+  ) {
     super(message);
     this.name = 'IndexResolutionError';
   }
@@ -190,7 +195,7 @@ export class SessionService {
       indices = await this.broker.getIndexList(definition.exchange);
     } catch (error) {
       if (error instanceof FlattradeIndexListError) {
-        throw new IndexResolutionError(error.code, error.message);
+        throw new IndexResolutionError(error.code, error.message, error.diagnostics);
       }
       throw new IndexResolutionError('BROKER_API_FAILURE', 'Flattrade index-list request failed.');
     }

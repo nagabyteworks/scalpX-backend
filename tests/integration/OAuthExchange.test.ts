@@ -48,6 +48,164 @@ describe('OAuthExchange & SessionService Integration', () => {
       .rejects.toMatchObject({ code: 'BROKER_SESSION_UNAVAILABLE' });
   });
 
+  it('sends the documented POST payload and form-encoded jKey to GetIndexList', async () => {
+    const token = 'VERIFIED SESSION+/=';
+    mockServer.sessionToken = token;
+    restAdapter.setSessionToken(token);
+
+    await expect(restAdapter.getIndexList('BSE')).resolves.toEqual([
+      { idxname: 'SENSEX', token: '987654321', exchange: 'BSE' },
+    ]);
+
+    const request = mockServer.receivedRequests.find((item) => item.url.endsWith('/GetIndexList'));
+    expect(request).toMatchObject({
+      method: 'POST',
+      contentType: 'application/x-www-form-urlencoded',
+    });
+    const form = new URLSearchParams(request!.body);
+    expect(JSON.parse(form.get('jData')!)).toEqual({ uid: 'FT001', exch: 'BSE' });
+    expect(form.get('jKey')).toBe(token);
+  });
+
+  it('validates an unsuccessful GetIndexList response before identifying an invalid session', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.sessionInvalid = true;
+    mockServer.indexListResponse = {
+      stat: 'Not_Ok',
+      emsg: 'Session Expired : Invalid Session Key',
+    };
+
+    await expect(restAdapter.getIndexList('BSE')).rejects.toMatchObject({
+      code: 'BROKER_SESSION_UNAVAILABLE',
+      diagnostics: {
+        endpoint: '/GetIndexList',
+        exchange: 'BSE',
+        stat: 'Not_Ok',
+        sessionTokenPresent: true,
+        sessionValidation: 'INVALID',
+        failureKind: 'BROKER_REJECTION',
+      },
+    });
+  });
+
+  it('preserves a broker rejection while distinguishing it from an invalid session', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.indexListResponse = {
+      stat: 'Not_Ok',
+      emsg: 'Market data service is temporarily unavailable',
+    };
+
+    await expect(restAdapter.getIndexList('NSE')).rejects.toMatchObject({
+      code: 'BROKER_API_FAILURE',
+      diagnostics: {
+        stat: 'Not_Ok',
+        emsg: 'Market data service is temporarily unavailable',
+        sessionValidation: 'VALID',
+        failureKind: 'BROKER_REJECTION',
+      },
+    });
+  });
+
+  it('keeps session validity UNKNOWN when the read-only Limits validation cannot complete', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.indexListResponse = { stat: 'Not_Ok', emsg: 'Request rejected' };
+    mockServer.limitsNetworkFailure = true;
+
+    await expect(restAdapter.getIndexList('NSE')).rejects.toMatchObject({
+      code: 'BROKER_API_FAILURE',
+      diagnostics: {
+        stat: 'Not_Ok',
+        sessionValidation: 'UNKNOWN',
+        failureKind: 'BROKER_REJECTION',
+      },
+    });
+  });
+
+  it('captures HTTP errors and the broker response without treating a valid session as expired', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.indexListStatusCode = 503;
+    mockServer.indexListResponse = {
+      stat: 'Not_Ok',
+      emsg: 'Index service unavailable',
+    };
+
+    await expect(restAdapter.getIndexList('BSE')).rejects.toMatchObject({
+      code: 'BROKER_API_FAILURE',
+      diagnostics: {
+        httpStatus: 503,
+        stat: 'Not_Ok',
+        emsg: 'Index service unavailable',
+        sessionValidation: 'VALID',
+        failureKind: 'HTTP_ERROR',
+      },
+    });
+  });
+
+  it('reports invalid JSON while keeping the session-validation result separate', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.indexListRawBody = '{"stat":';
+
+    await expect(restAdapter.getIndexList('NSE')).rejects.toMatchObject({
+      code: 'BROKER_API_FAILURE',
+      diagnostics: {
+        httpStatus: 200,
+        sessionValidation: 'VALID',
+        failureKind: 'INVALID_JSON',
+      },
+    });
+  });
+
+  it('rejects a missing values field but preserves a valid empty index list', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.indexListResponse = { stat: 'Ok' };
+    await expect(restAdapter.getIndexList('NSE')).rejects.toMatchObject({
+      code: 'INVALID_INDEX_RESPONSE',
+      diagnostics: { sessionValidation: 'VALID', failureKind: 'INVALID_RESPONSE' },
+    });
+
+    mockServer.indexListResponse = { stat: 'Ok', values: [] };
+    await expect(restAdapter.getIndexList('NSE')).resolves.toEqual([]);
+    await expect(sessionService.getIndexSpotInstrumentId('NIFTY'))
+      .rejects.toMatchObject({ code: 'INDEX_NOT_FOUND' });
+  });
+
+  it('captures network failures and validates the session independently', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.indexListNetworkFailure = true;
+
+    await expect(restAdapter.getIndexList('NSE')).rejects.toMatchObject({
+      code: 'BROKER_API_FAILURE',
+      diagnostics: {
+        httpStatus: null,
+        sessionValidation: 'VALID',
+        failureKind: 'NETWORK',
+      },
+    });
+  });
+
+  it('sanitizes broker diagnostics before preserving them on the typed error', async () => {
+    restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
+    mockServer.indexListResponse = {
+      stat: 'Not_Ok',
+      emsg: 'jKey=VERIFIED_SESSION_TOKEN_XYZ api_secret=SECRET_456 otp=123456',
+    };
+
+    try {
+      await restAdapter.getIndexList('NSE');
+      throw new Error('Expected GetIndexList to reject.');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'BROKER_API_FAILURE',
+        diagnostics: { sessionValidation: 'VALID' },
+      });
+      const serialized = JSON.stringify(error);
+      expect(serialized).not.toContain('VERIFIED_SESSION_TOKEN_XYZ');
+      expect(serialized).not.toContain('SECRET_456');
+      expect(serialized).not.toContain('123456');
+      expect(serialized).toContain('[REDACTED]');
+    }
+  });
+
   it('resolves the SENSEX spot token from the authenticated BSE index list, not a constant', async () => {
     await stateStore.saveDailySession(getTodayDateIST(), 'VERIFIED_SESSION_TOKEN_XYZ');
     restAdapter.setSessionToken('VERIFIED_SESSION_TOKEN_XYZ');
@@ -115,6 +273,7 @@ describe('OAuthExchange & SessionService Integration', () => {
       stat: 'Not_Ok',
       emsg: 'Session Expired : Invalid Session Key',
     };
+    mockServer.sessionInvalid = true;
     const failedSessionService = new SessionService(restAdapter, stateStore, 'TEST_API_KEY_123', {});
     await expect(failedSessionService.getIndexSpotInstrumentId('NIFTY'))
       .rejects.toMatchObject({ code: 'BROKER_SESSION_UNAVAILABLE' });
