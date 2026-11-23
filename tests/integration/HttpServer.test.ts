@@ -46,8 +46,6 @@ describe('HttpServer Transport Layer Integration', () => {
     sessionService = new SessionService(broker as any, stateStore, 'API_KEY');
     reconciler = new ReconcilerService(broker, feed, engine, stateStore);
 
-    stateStore.authorizeDevice('DEVICE_123', 'Test Device');
-
     server = new HttpServer(
       {
         jwtSecret: JWT_SECRET,
@@ -62,7 +60,7 @@ describe('HttpServer Transport Layer Integration', () => {
     );
 
     baseUrl = await server.listen(0, '127.0.0.1');
-    validToken = jwt.sign({ sub: 'trader1', deviceId: 'DEVICE_123' }, JWT_SECRET, { algorithm: 'HS256' });
+    validToken = jwt.sign({ sub: 'trader1', role: 'owner' }, JWT_SECRET, { algorithm: 'HS256' });
   });
 
   afterEach(async () => {
@@ -82,30 +80,23 @@ describe('HttpServer Transport Layer Integration', () => {
     expect(data.openPositionsCount).toBe(0);
   });
 
-  it('GET /api/auth/login-url rejects request missing X-Device-Id or Authorization header', async () => {
-    // Missing X-Device-Id
-    const res1 = await fetch(`${baseUrl}/api/auth/login-url`, {
-      headers: { Authorization: `Bearer ${validToken}` },
-    });
-    expect(res1.status).toBe(400);
-
+  it('GET /api/auth/login-url requires an Authorization header', async () => {
     // Missing Authorization
-    const res2 = await fetch(`${baseUrl}/api/auth/login-url`, {
-      headers: { 'X-Device-Id': 'DEVICE_123' },
+    const res1 = await fetch(`${baseUrl}/api/auth/login-url`, {
+      headers: {},
     });
-    expect(res2.status).toBe(401);
+    expect(res1.status).toBe(401);
 
     // Invalid Token
-    const res3 = await fetch(`${baseUrl}/api/auth/login-url`, {
+    const res2 = await fetch(`${baseUrl}/api/auth/login-url`, {
       headers: {
-        'X-Device-Id': 'DEVICE_123',
         Authorization: 'Bearer INVALID_TOKEN',
       },
     });
-    expect(res3.status).toBe(401);
+    expect(res2.status).toBe(401);
   });
 
-  it('GET /api/auth/login-url succeeds with valid JWT and X-Device-Id', async () => {
+  it('GET /api/auth/login-url succeeds with a valid JWT', async () => {
     const res = await fetch(`${baseUrl}/api/auth/login-url`, {
       headers: {
         'X-Device-Id': 'DEVICE_123',

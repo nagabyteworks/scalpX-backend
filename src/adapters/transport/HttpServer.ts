@@ -31,21 +31,13 @@ export interface HttpServerConfig {
    */
   corsOrigin?: string | string[] | boolean;
   /**
-   * One-time or master enrollment secret for owner device provisioning.
+   * Backend-only TOTP secret used to authenticate the Android owner.
    */
-  enrollmentSecret?: string;
   deviceTotpSecret?: string;
 }
 
-export const ProvisionDeviceSchema = z.object({
-  enrollmentSecret: z.string().min(1, 'Enrollment secret is required'),
-  deviceName: z.string().default('Android Device'),
-});
-
-export const DeviceAuthenticationSchema = z.object({
-  deviceId: z.string().uuid(),
+export const TotpAuthenticationSchema = z.object({
   totp: z.string().regex(/^\d{6}$/),
-  deviceName: z.string().trim().min(1).max(80).default('Android Device'),
 });
 
 // Zod Schemas for Request Validation
@@ -103,7 +95,7 @@ export class HttpServer {
   private readonly stateStore: SqliteStateStore;
   private readonly broker: BrokerPort;
   private readonly wsHub?: ClientWsHub;
-  private readonly deviceAuthFailures = new Map<string, { count: number; windowEndsAt: number }>();
+  private readonly totpAuthFailures = new Map<string, { count: number; windowEndsAt: number }>();
 
   constructor(
     config: HttpServerConfig,
@@ -168,19 +160,15 @@ export class HttpServer {
     this.app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
       const url = request.url.split('?')[0] ?? '';
 
-      // Skip public routes, OAuth callback, and device provisioning endpoint
+      // Authentication and broker OAuth callback routes are public.
       if (
         !url.startsWith('/api/') ||
+        url === '/api/auth/daily-login' ||
         url === '/api/auth/provision-device' ||
+        url === '/api/auth/revoke-device' ||
         url === '/api/auth/device/authenticate' ||
         url === '/api/auth/flattrade/callback'
       ) {
-        return;
-      }
-
-      const deviceId = request.headers['x-device-id'];
-      if (!deviceId || typeof deviceId !== 'string') {
-        reply.code(400).send({ error: 'Missing or invalid required X-Device-Id header' });
         return;
       }
 
@@ -193,33 +181,12 @@ export class HttpServer {
       const token = authHeader.substring(7);
       try {
         const decoded = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] }) as {
-          deviceId?: string;
           sub?: string;
           role?: string;
         };
 
-        // Enforce device-binding: token issued for device A cannot be used from device B
-        if (decoded.deviceId && decoded.deviceId !== deviceId) {
-          reply.code(403).send({ error: 'Device ID mismatch with token claim' });
-          return;
-        }
-
-        // Enforce device revocation
-        const isRevoked = await this.stateStore.isDeviceRevoked(deviceId);
-        if (isRevoked) {
-          reply.code(401).send({ error: 'Device authorization has been revoked' });
-          return;
-        }
-        const isAuthorized = await this.stateStore.isDeviceAuthorized(deviceId);
-        if (!isAuthorized) {
-          reply.code(403).send({ error: 'Device is not authorized' });
-          return;
-        }
-
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (request as any).user = decoded;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (request as any).deviceId = deviceId;
       } catch {
         reply.code(401).send({ error: 'Invalid or expired JWT token' });
         return;
@@ -415,59 +382,29 @@ export class HttpServer {
     this.app.get('/auth/flattrade/callback', flattradeCallbackHandler);
 
     // -------------------------------------------------------------
-    // Device Provisioning Endpoints
+    // TOTP authentication endpoint
+
+    this.app.post('/api/auth/provision-device', async (_request, reply) => {
+      reply.code(404).send({ error: 'Not found' });
+    });
+    this.app.post('/api/auth/revoke-device', async (_request, reply) => {
+      reply.code(404).send({ error: 'Not found' });
+    });
+    this.app.post('/api/auth/device/authenticate', async (_request, reply) => {
+      reply.code(404).send({ error: 'Not found' });
+    });
     // -------------------------------------------------------------
 
-    /**
-     * POST /api/auth/provision-device
-     * Secure owner provisioning workflow:
-     * - Requires X-Device-Id header
-     * - Validates high-entropy enrollmentSecret
-     * - Issues a 30-day JWT containing { sub: 'scalpx-owner', role: 'owner', deviceId }
-     * - Stores device authorization in SQLite
-     */
-    this.app.post('/api/auth/provision-device', async (request, reply) => {
-      const deviceId = request.headers['x-device-id'];
-      if (!deviceId || typeof deviceId !== 'string' || deviceId.trim().length === 0) {
-        reply.code(400).send({ error: 'Missing required X-Device-Id header' });
-        return;
-      }
-
-      const parsed = ProvisionDeviceSchema.safeParse(request.body);
+    this.app.post('/api/auth/daily-login', async (request, reply) => {
+      const parsed = TotpAuthenticationSchema.safeParse(request.body);
       if (!parsed.success) {
-        reply.code(400).send({
-          error: 'Validation failed',
-          details: parsed.error.issues,
-        });
+        reply.code(400).send({ error: 'Provide a six-digit TOTP code.' });
         return;
       }
-
-      const { enrollmentSecret, deviceName } = parsed.data;
-      const expectedSecret = this.config.enrollmentSecret;
-      if (!expectedSecret || enrollmentSecret !== expectedSecret) {
-        reply.code(401).send({ error: 'Invalid or missing enrollment secret' });
-        return;
-      }
-
-      await this.stateStore.authorizeDevice(deviceId, deviceName);
-
-      return {
-        status: 'ok',
-        deviceId,
-        deviceStatus: 'AUTHORIZED',
-      };
-    });
-
-    this.app.post('/api/auth/device/authenticate', async (request, reply) => {
-      const parsed = DeviceAuthenticationSchema.safeParse(request.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: 'Provide a device UUID and six-digit TOTP.' });
-        return;
-      }
-      const { deviceId, totp, deviceName } = parsed.data;
+      const { totp } = parsed.data;
       const now = Date.now();
-      const key = `${request.ip}:${deviceId}`;
-      const previous = this.deviceAuthFailures.get(key);
+      const key = request.ip;
+      const previous = this.totpAuthFailures.get(key);
       if (previous && previous.windowEndsAt > now && previous.count >= 5) {
         reply.code(429).send({ error: 'Too many authentication attempts. Wait five minutes and try again.' });
         return;
@@ -476,25 +413,17 @@ export class HttpServer {
         reply.code(503).send({ error: 'Device TOTP authentication is not configured on the backend.' });
         return;
       }
-      if (await this.stateStore.isDeviceRevoked(deviceId)) {
-        reply.code(401).send({ error: 'Device authorization has been revoked.' });
-        return;
-      }
-      if (!(await this.stateStore.isDeviceAuthorized(deviceId))) {
-        reply.code(403).send({ error: 'Device is not pre-authorized.' });
-        return;
-      }
       const step = matchingTotpStep(this.config.deviceTotpSecret, totp, now);
-      if (step === null || !(await this.stateStore.consumeDeviceTotpStep(deviceId, step))) {
-        this.deviceAuthFailures.set(key, !previous || previous.windowEndsAt <= now
+      if (step === null || !(await this.stateStore.consumeTotpStep(step))) {
+        this.totpAuthFailures.set(key, !previous || previous.windowEndsAt <= now
           ? { count: 1, windowEndsAt: now + 5 * 60_000 }
           : { ...previous, count: previous.count + 1 });
         reply.code(401).send({ error: 'Invalid or already-used TOTP.' });
         return;
       }
-      this.deviceAuthFailures.delete(key);
+      this.totpAuthFailures.delete(key);
       const accessToken = jwt.sign(
-        { sub: 'scalpx-owner', role: 'owner', deviceId },
+        { sub: 'scalpx-owner', role: 'owner' },
         this.config.jwtSecret,
         { algorithm: 'HS256', expiresIn: '15m' }
       );
@@ -502,18 +431,7 @@ export class HttpServer {
         status: 'ok',
         accessToken,
         expiresIn: 900,
-        device: { id: deviceId, name: deviceName, status: 'AUTHORIZED' },
       };
-    });
-
-    /**
-     * POST /api/auth/revoke-device
-     * Revokes device authorization (requires authenticated session).
-     */
-    this.app.post('/api/auth/revoke-device', async (request, reply) => {
-      const deviceId = request.headers['x-device-id'] as string;
-      await this.stateStore.revokeDevice(deviceId);
-      return { status: 'ok', message: `Device ${deviceId} successfully revoked` };
     });
 
     // -------------------------------------------------------------
@@ -534,7 +452,6 @@ export class HttpServer {
         trading: { mode: 'LIVE', enabled: this.config.tradingEnabled, authorized: false },
         broker: { connected: brokerConnected, sessionValidity: session.sessionValidity },
         marketFeed: { connected: !!feed?.isTransportConnected(), status: feed?.getConnectionState() ?? 'DISCONNECTED' },
-        device: { id: (request as any).deviceId, status: 'AUTHORIZED' },
         features: { optionsTrading: false, positions: true, orderManagement: true },
       };
     });

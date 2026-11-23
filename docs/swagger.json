@@ -25,8 +25,7 @@
   ],
   "security": [
     {
-      "BearerAuth": [],
-      "DeviceIdAuth": []
+      "BearerAuth": []
     }
   ],
   "paths": {
@@ -233,103 +232,6 @@
         "responses": {
           "302": {
             "description": "Redirects to scalper://auth/success"
-          }
-        }
-      }
-    },
-    "/api/auth/provision-device": {
-      "post": {
-        "summary": "Owner Device Provisioning",
-        "description": "Enrolls a new client device by verifying the high-entropy enrollment secret configured on EC2. Issues a 30-day device-bound JWT.",
-        "security": [
-          {
-            "DeviceIdAuth": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ProvisionDeviceRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Device successfully enrolled and bound",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProvisionDeviceResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/400BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/401Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/403Forbidden"
-          },
-          "429": {
-            "$ref": "#/components/responses/429TooManyRequests"
-          }
-        }
-      }
-    },
-    "/api/auth/revoke-device": {
-      "post": {
-        "summary": "Revoke Authorized Device",
-        "description": "Revokes a device authorization. Any future requests with this device ID are immediately rejected.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "deviceId"
-                ],
-                "properties": {
-                  "deviceId": {
-                    "type": "string",
-                    "format": "uuid"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Device revoked",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string",
-                      "example": "ok"
-                    },
-                    "message": {
-                      "type": "string"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/400BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/401Unauthorized"
           }
         }
       }
@@ -664,53 +566,6 @@
         }
       }
     },
-    "/api/auth/device/authenticate": {
-      "post": {
-        "summary": "Authenticate a pre-authorized device using backend TOTP",
-        "security": [],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "deviceId",
-                  "totp"
-                ],
-                "properties": {
-                  "deviceId": {
-                    "type": "string",
-                    "format": "uuid"
-                  },
-                  "totp": {
-                    "type": "string",
-                    "pattern": "^[0-9]{6}$"
-                  },
-                  "deviceName": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Short-lived device access token issued"
-          },
-          "401": {
-            "description": "Invalid TOTP or device is not authorized"
-          },
-          "429": {
-            "description": "Rate limit exceeded"
-          },
-          "503": {
-            "description": "Backend TOTP secret is not configured"
-          }
-        }
-      }
-    },
     "/api/app/config": {
       "get": {
         "summary": "Read backend-owned configuration and operational status",
@@ -739,6 +594,41 @@
           }
         }
       }
+    },
+    "/api/auth/daily-login": {
+      "post": {
+        "summary": "Authenticate with a six-digit TOTP",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "totp"
+                ],
+                "properties": {
+                  "totp": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated session JWT"
+          },
+          "401": {
+            "description": "Invalid or replayed TOTP"
+          },
+          "429": {
+            "description": "Rate limited"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -747,13 +637,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT",
-        "description": "HS256 signed backend JWT with embedded deviceId claim."
-      },
-      "DeviceIdAuth": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-Device-Id",
-        "description": "Client device permanent UUID. Must match token deviceId claim."
+        "description": "HS256 signed backend JWT."
       }
     },
     "schemas": {
@@ -826,47 +710,6 @@
               "LIVE"
             ],
             "example": "LIVE"
-          }
-        }
-      },
-      "ProvisionDeviceRequest": {
-        "type": "object",
-        "required": [
-          "enrollmentSecret"
-        ],
-        "properties": {
-          "enrollmentSecret": {
-            "type": "string",
-            "description": "High-entropy secret configured on server (/etc/scalpx/env)"
-          },
-          "deviceName": {
-            "type": "string",
-            "default": "Android Device"
-          }
-        }
-      },
-      "ProvisionDeviceResponse": {
-        "type": "object",
-        "required": [
-          "status",
-          "deviceId",
-          "deviceStatus"
-        ],
-        "properties": {
-          "status": {
-            "type": "string",
-            "example": "ok"
-          },
-          "deviceId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "deviceStatus": {
-            "type": "string",
-            "enum": [
-              "AUTHORIZED"
-            ],
-            "example": "AUTHORIZED"
           }
         }
       },

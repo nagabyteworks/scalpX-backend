@@ -1,41 +1,30 @@
-# scalpX Engineering Review and Current Implementation
+# Implementation Review
 
-## Project purpose and architecture
+## Authentication architecture
 
-scalpX is a single-user SENSEX and index-options trading cockpit. The Android client identifies its device, authenticates with the backend, displays backend-owned connection and market status, and sends explicit user actions. The TypeScript/Fastify backend owns device authorization, TOTP validation, Flattrade OAuth/session management, broker WebSocket subscriptions, market-data validation, order gates, persistence, risk checks, and position reconciliation. SQLite remains the persistence layer. Production remains LIVE-only, and `TRADING_ENABLED=false` is the safe setting; authentication never enables order execution.
+Device pre-authorization has been removed completely. The backend no longer creates, reads, or migrates `authorized_devices`, and provisioning/revoke/device-authenticate routes do not exist. The Android app does not generate or store a UUID.
 
-## Authentication and device authorization
+The application session flow is TOTP only:
 
-Android generates and retains a UUID in its secure configuration store. An administrator first registers that UUID through the authenticated owner provisioning route using `DEVICE_ENROLLMENT_SECRET`. Provisioning only marks the device authorized; it does not issue a JWT. `POST /api/auth/device/authenticate` then requires the authorized, non-revoked device UUID and a six-digit RFC 6238 TOTP. The backend reads `DEVICE_TOTP_SECRET`, applies rate limiting, compares codes in constant time, records the accepted time step in SQLite to reject replay, and issues a 15-minute HS256 access token. Android sends that token and matching `X-Device-Id` for API calls and stores it in encrypted preferences. The TOTP secret never leaves the backend and request-body logging redacts the code.
+1. `POST /api/auth/daily-login` accepts exactly six digits.
+2. `DEVICE_TOTP_SECRET` remains backend-only.
+3. RFC 6238 verification uses a ±1 step window.
+4. Accepted steps are committed atomically through `totp_replay_state.last_step`.
+5. Repeated or older steps are rejected.
+6. Five failures trigger a five-minute IP lockout.
+7. A 15-minute HS256 bearer session is issued.
+8. REST and WebSocket authentication require the bearer session only.
 
-Flattrade broker login is separate. The authenticated Android client opens `GET /api/auth/login-url` in the system browser. Flattrade redirects its registered callback to `/api/auth/flattrade/callback?request_code=...`; the backend performs the documented token exchange, stores the token encrypted for the current Indian trade date, validates it via `/Limits`, and reconnects feeds. A transient broker validation failure remains `UNKNOWN`; only an explicit invalid-session response is `INVALID`. Direct OTP automation and undocumented `/auth/session` and `/ftauth` endpoints were removed. The official [Flattrade Pi API documentation](https://pi.flattrade.in/docs) describes browser authorization, callback request codes, token exchange, and `/Limits` validation.
+## Security and migration behavior
 
-Environment configuration requires `APP_JWT_SECRET`, `DEVICE_ENROLLMENT_SECRET` (at least 32 characters), real Flattrade user/API credentials, `DB_SESSION_ENCRYPTION_KEY` (64 hex characters), and the registered HTTPS callback URL. `DEVICE_TOTP_SECRET` is required to authenticate devices; if it is absent, device authentication returns 503. `TRADING_ENABLED` defaults to `false`. Do not place these secrets in Android build configuration or source control. The backend reads local development values from an ignored `.env`; production reads `/etc/scalpx/env`.
+Startup migration drops the legacy `authorized_devices` table and creates atomic TOTP replay state. TOTP codes and bearer tokens are redacted in application logging. Protected routes fail closed without a valid JWT.
 
-## Live market data and current blocker
+## Trading state
 
-The backend resolves the current BSE SENSEX index token dynamically using authenticated Flattrade `GetIndexList`, matching the exact `SENSEX` name and validating the numeric token before subscribing with `BSE|token`. The WebSocket adapter tracks the latest price and timestamp per exchange-qualified instrument, clears ticks on disconnect/resubscription, and refuses stale spot values. `/api/market-data/sensex` reports `READY`, `STALE`, or `WAITING_FOR_TICK`, with no price when the tick is not fresh. Android displays backend values and has no hardcoded market price or broker token.
+The backend retains live trading state and broker integration. It must keep `TRADING_ENABLED=false` during implementation and testing. The protective stop-loss is broker-side `SL-LMT`; trailing targets are backend RAM-only and are not persisted or sent to Flattrade.
 
-The official docs list BSE index-derivative and NFO index-derivative scrip-master downloads, but the accessible documentation does not specify the downloadable URL, byte format, or schema. No reliable official source/schema or real sample file has been verified. Therefore the BFO option master parser/cache, expiry selection, ATM CE/PE resolution, option quote subscriptions, complete option-chain endpoint, and validated live entry orders remain unimplemented and fail closed. The `987654321` token appears only in a clearly marked unit-test mock and is not a live token or integration evidence. Do not treat current spot resolution as verified live-broker operation; the OAuth and WebSocket behavior has only automated mock coverage.
+Backend startup reconciles broker positions and preserves unknown state as manual intervention rather than guessing target state.
 
-## Health, status, and order safety
+## Verification
 
-`/health/live` reports process liveness only. `/health/ready` returns 503 until broker/session/feed checks, authoritative instrument data, independent fresh spot/CE/PE data, and account reconciliation are ready; its component report identifies unavailable stages. `GET /api/app/config` is authenticated and returns only non-secret environment, trading gate, broker, feed, device, and feature state. `GET /api/auth/status` separately reports broker session state, WebSocket transport/authentication, and tick readiness. New entries are rejected when `TRADING_ENABLED=false`; even if enabled, current entry handling returns 503 until instrument and quote verification is implemented. Emergency exit routes remain independent of the new-entry flag and must only act on persisted, reconciled positions.
-
-There is no production paper mode or simulator fallback. The broker mock adapter lives under `tests/mock` and is only used by automated tests. Browser OAuth failure does not synthesize a session. Option-chain requests return 503 while authoritative BFO contracts and fresh quotes are unavailable.
-
-## Persistence change
-
-`authorized_devices` has an additive SQLite migration adding nullable `last_totp_step`. On authentication, a conditional update stores the accepted time step only if it is later than the saved step. Existing rows remain authorized and can authenticate once a backend TOTP secret is configured. This migration preserves existing records and does not discard database contents. Back up the existing SQLite file before deployment as a standard operational precaution.
-
-## Deployment and validation
-
-The deployment script targets `/opt/scalpx`, the `flattrade-engine` systemd unit, `/etc/scalpx/env`, and persistent `/var/lib/scalpx`. It checks paths and service working-directory agreement, excludes secrets, databases, logs, and data from rsync, creates a compressed pre-deploy code backup under `/var/lib/scalpx/deploy-backups`, and restores the prior code and restarts the service if post-sync installation or liveness checks fail. It polls `/health/live` because market readiness is intentionally false until the official option master is available. The script was reviewed but not run; production EC2, credentials, AWS infrastructure, and service state were not touched.
-
-Tests use RFC TOTP vectors, SQLite replay prevention, Flattrade REST/WebSocket mocks, stale-feed transitions, live-only order rejection, OAuth token exchange fixtures, and deployment-script static checks. Mock token values are test data only. Current local validation: backend `npm test` (106 passing across 19 files), `npm run typecheck`, `npm run build`, and `bash -n deploy/deploy.sh`; Android `./gradlew testDebugUnitTest assembleDebug`. Do not claim a live integration or trading-ready system until the official BFO master and real broker flow have been verified in a separately authorized environment.
-
-For a local checkout, install backend dependencies with `npm ci`, then run the backend validation commands above from `scalpX-backend`. Run Android checks from `scalpX-android` using the Gradle wrapper. No test submits a real order, and the current production configuration keeps `TRADING_ENABLED=false`.
-
-## Backend connectivity investigation (2026-11-23)
-
-Android is configured for `https://trade.nagabyte.com`; Retrofit requests `/health`, and OkHttp adds device/JWT headers only when available. Fastify's authentication hook skips all non-`/api/` paths, so `/health` is public. The backend binds to `127.0.0.1:3000`, matching the Caddy reverse-proxy upstream in `deploy/Caddyfile`; the systemd unit uses the same backend directory and entry point. DNS resolved to `18.61.185.225`, the HTTPS certificate validated for `trade.nagabyte.com`, and public requests to `/health`, `/health/live`, and `/` all returned HTTP 502 with `server: Caddy`. This identifies the observed failure at the Caddy-to-backend upstream boundary; it is not a Retrofit URL, Android JWT, DNS, or TLS failure. The precise reason the EC2 upstream is unavailable cannot be confirmed without inspecting EC2 service/Caddy logs, which this task forbids. Android now distinguishes gateway HTTP errors from local network failures. The requested local `.env` could not be populated because no Flattrade or backend secrets exist in this workspace/environment; do not replace those values with fabricated credentials.
+Required verification includes TOTP success, replay, invalid input, rate limiting, session expiration, unauthorized API access, market-data stale handling, order lifecycle, SL lifecycle, restart reconciliation, backend tests, Android tests, type checks, and builds.

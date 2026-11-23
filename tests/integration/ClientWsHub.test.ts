@@ -38,7 +38,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
       });
     });
 
-    validToken = jwt.sign({ sub: 'trader1', deviceId: 'DEVICE_001' }, JWT_SECRET, { algorithm: 'HS256' });
+    validToken = jwt.sign({ sub: 'trader1', role: 'owner' }, JWT_SECRET, { algorithm: 'HS256' });
   });
 
   afterEach(async () => {
@@ -46,7 +46,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it('rejects connection without valid token and deviceId with close code 4001', async () => {
+  it('rejects connection without a valid bearer token', async () => {
     const ws = new WebSocket(wsUrl);
 
     const closeCode = await new Promise<number>((resolve) => {
@@ -59,8 +59,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
   it('authenticates and receives initial snapshot', async () => {
     const ws = new WebSocket(wsUrl, {
       headers: {
-        Authorization: `Bearer ${validToken}`,
-        'X-Device-Id': 'DEVICE_001',
+        Authorization: `Bearer ${validToken}`
       },
     });
 
@@ -78,8 +77,7 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
   it('coalesces ticks and broadcasts throttled snapshot every interval', async () => {
     const ws = new WebSocket(wsUrl, {
       headers: {
-        Authorization: `Bearer ${validToken}`,
-        'X-Device-Id': 'DEVICE_001',
+        Authorization: `Bearer ${validToken}`
       },
     });
 

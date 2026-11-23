@@ -16,12 +16,6 @@ export const EnvSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
   APP_JWT_SECRET: z.string().min(8, 'APP_JWT_SECRET must be at least 8 characters'),
-  /**
-   * High-entropy enrollment secret used by the owner to provision new Android devices.
-   * Stored securely in /etc/scalpx/env on EC2; never included in the Android APK.
-   */
-  DEVICE_ENROLLMENT_SECRET: z.string().min(32, 'DEVICE_ENROLLMENT_SECRET must be at least 32 characters'),
-
   // Flattrade API v2 Credentials
   FLATTRADE_USER_ID: z.string().default('MOCK_USER'),
   FLATTRADE_API_KEY: z.string().default('MOCK_KEY'),

@@ -9,7 +9,6 @@ const VALID_LIVE_ENV = {
   FLATTRADE_API_SECRET: 'real_api_secret',
   FLATTRADE_REDIRECT_URL: 'https://trade.nagabyte.com/api/auth/flattrade/callback',
   DB_SESSION_ENCRYPTION_KEY: 'b'.repeat(64),
-  DEVICE_ENROLLMENT_SECRET: 'enrollment_secret_for_tests_at_least_32_chars',
 };
 
 describe('live-only environment configuration', () => {

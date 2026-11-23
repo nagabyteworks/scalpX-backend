@@ -96,20 +96,16 @@ export class SqliteStateStore implements StateStorePort {
       );
     `);
 
-    // 6. authorized_devices table (for device-bound provisioning and revocation)
+    // Legacy device authorization state is not created. Existing installations
+    // are migrated by dropping the obsolete table below.
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS authorized_devices (
-        device_id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        revoked_at INTEGER,
-        last_totp_step INTEGER
-      );
+      CREATE TABLE IF NOT EXISTS totp_replay_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_step INTEGER
+      )
     `);
-    const deviceColumns = this.db.pragma('table_info(authorized_devices)') as Array<{ name: string }>;
-    if (!deviceColumns.some((column) => column.name === 'last_totp_step')) {
-      this.db.exec('ALTER TABLE authorized_devices ADD COLUMN last_totp_step INTEGER');
-    }
+    this.db.exec('INSERT OR IGNORE INTO totp_replay_state (id, last_step) VALUES (1, NULL)');
+    this.db.exec('DROP TABLE IF EXISTS authorized_devices');
   }
 
   /**
@@ -364,61 +360,15 @@ export class SqliteStateStore implements StateStorePort {
     return this.riskState.getRiskState(tradeDate);
   }
 
-  /**
-   * Device Authorization & Provisioning Methods
-   */
-  async authorizeDevice(deviceId: string, name = 'Android Device'): Promise<void> {
+  async consumeTotpStep(step: number): Promise<boolean> {
     return this.enqueue(() => {
-      const stmt = this.db.prepare(`
-        INSERT INTO authorized_devices (device_id, name, created_at, revoked_at)
-        VALUES (?, ?, ?, NULL)
-        ON CONFLICT(device_id) DO UPDATE SET
-          name = excluded.name,
-          revoked_at = NULL
-      `);
-      stmt.run(deviceId, name, Date.now());
-    });
-  }
-
-  async isDeviceRevoked(deviceId: string): Promise<boolean> {
-    return this.enqueue(() => {
-      const stmt = this.db.prepare(`SELECT revoked_at FROM authorized_devices WHERE device_id = ?`);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const row = stmt.get(deviceId) as any;
-      if (!row) {
-        // Device was never provisioned — treat as not authorized
-        return false;
-      }
-      return row.revoked_at !== null;
-    });
-  }
-
-  async isDeviceAuthorized(deviceId: string): Promise<boolean> {
-    return this.enqueue(() => {
-      const stmt = this.db.prepare(`SELECT device_id, revoked_at FROM authorized_devices WHERE device_id = ?`);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const row = stmt.get(deviceId) as any;
-      if (!row) return false;
-      return row.revoked_at === null;
-    });
-  }
-
-  async consumeDeviceTotpStep(deviceId: string, step: number): Promise<boolean> {
-    return this.enqueue(() => {
-      const result = this.db.prepare(`
-        UPDATE authorized_devices
-        SET last_totp_step = ?
-        WHERE device_id = ? AND revoked_at IS NULL
-          AND (last_totp_step IS NULL OR last_totp_step < ?)
-      `).run(step, deviceId, step);
-      return result.changes === 1;
-    });
-  }
-
-  async revokeDevice(deviceId: string): Promise<void> {
-    return this.enqueue(() => {
-      const stmt = this.db.prepare(`UPDATE authorized_devices SET revoked_at = ? WHERE device_id = ?`);
-      stmt.run(Date.now(), deviceId);
+      const transaction = this.db.transaction(() => {
+        const row = this.db.prepare('SELECT last_step FROM totp_replay_state WHERE id = 1').get() as { last_step: number | null };
+        if (row.last_step !== null && step <= row.last_step) return false;
+        this.db.prepare('UPDATE totp_replay_state SET last_step = ? WHERE id = 1').run(step);
+        return true;
+      });
+      return transaction();
     });
   }
 

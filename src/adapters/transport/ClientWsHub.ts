@@ -58,7 +58,7 @@ export class ClientWsHub {
       // 1. Authenticate WebSocket upgrade
       const auth = this.authenticateRequest(req);
       if (!auth) {
-        ws.close(4001, 'Unauthorized: Invalid JWT or missing Device-Id');
+        ws.close(4001, 'Unauthorized: Invalid JWT');
         return;
       }
 
@@ -87,21 +87,10 @@ export class ClientWsHub {
       return false;
     }
 
-    const deviceId = req.headers['x-device-id'];
-    if (!deviceId || typeof deviceId !== 'string' || deviceId.trim().length === 0) {
-      return false;
-    }
-
     const token = authHeader.substring(7);
 
     try {
-      const decoded = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] }) as {
-        deviceId?: string;
-      };
-      // Enforce device-binding claim if present
-      if (decoded.deviceId && decoded.deviceId !== deviceId) {
-        return false;
-      }
+      jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] });
       return true;
     } catch {
       return false;
