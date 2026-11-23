@@ -595,37 +595,30 @@
         }
       }
     },
-    "/api/auth/daily-login": {
-      "post": {
-        "summary": "Authenticate with a six-digit TOTP",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "totp"
-                ],
-                "properties": {
-                  "totp": {
-                    "type": "string",
-                    "pattern": "^\\d{6}$"
-                  }
-                }
-              }
+    "/api/market-data/index": {
+      "get": {
+        "summary": "Get live SENSEX, NIFTY or BANKNIFTY spot data",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SENSEX",
+                "NIFTY",
+                "BANKNIFTY"
+              ]
             }
           }
-        },
+        ],
         "responses": {
           "200": {
-            "description": "Authenticated session JWT"
+            "description": "Fresh or stale broker-backed spot status"
           },
-          "401": {
-            "description": "Invalid or replayed TOTP"
-          },
-          "429": {
-            "description": "Rate limited"
+          "503": {
+            "description": "Instrument or live feed unavailable"
           }
         }
       }
@@ -637,7 +630,6 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT",
-        "description": "HS256 signed backend JWT with embedded deviceId claim."
       }
     },
     "schemas": {

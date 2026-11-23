@@ -4,23 +4,17 @@
 
 scalpX is a LIVE, single-user index-options trading backend for SENSEX and other configured indices. It owns Flattrade OAuth, market-data subscriptions, broker order submission, stop-loss management, target monitoring, risk controls, and reconciliation. Android is an interface only and contains no broker credentials or trading calculations.
 
-## Authentication
+## Authentication and broker access
 
-The only application authentication method is a six-digit RFC 6238 TOTP:
+The Android app starts directly and requires no application TOTP or device-authorization login.
 
-1. Android submits `{ "totp": "123456" }` to `POST /api/auth/daily-login`.
-2. The backend validates the code using the backend-only `DEVICE_TOTP_SECRET`.
-3. The backend atomically consumes the matching time step in SQLite replay state.
-4. A short-lived HS256 session JWT is issued.
-5. Protected REST and WebSocket endpoints require `Authorization: Bearer <JWT>`.
+Device UUIDs, TOTP validation, provisioning, revocation, and application JWT authentication are removed.
+Flattrade OAuth remains a separate broker-session flow:
 
-There is no device UUID, device provisioning, device enrollment, device revocation, or device-bound JWT. Legacy endpoints return 404:
-
-- `/api/auth/provision-device`
-- `/api/auth/revoke-device`
-- `/api/auth/device/authenticate`
-
-Failed TOTP attempts are rate limited by client IP. Replay, invalid codes, expired sessions, and unauthorized API access are fail closed.
+1. Android calls `GET /api/auth/login-url`.
+2. It opens the official Flattrade browser authorization URL.
+3. The backend exchanges the callback request code for the broker session.
+4. The backend validates and connects the Flattrade market-data WebSocket.
 
 ## Trading and risk invariants
 
@@ -37,7 +31,7 @@ Failed TOTP attempts are rate limited by client IP. Replay, invalid codes, expir
 ## Core services
 
 - `SessionService`: Flattrade broker session validation and OAuth callback handling.
-- `HttpServer`: authenticated REST API and TOTP login.
+- `HttpServer`: REST API and direct Android integration.
 - `ClientWsHub`: authenticated Android WebSocket snapshots and priority events.
 - `OrderManager`: entry, exit, and broker order lifecycle.
 - `RatchetLadderEngine`: RAM/in-memory ratcheting ladder state.
@@ -48,8 +42,6 @@ Failed TOTP attempts are rate limited by client IP. Replay, invalid codes, expir
 
 Required live configuration:
 
-- `APP_JWT_SECRET`
-- `DEVICE_TOTP_SECRET`
 - `FLATTRADE_USER_ID`
 - `FLATTRADE_API_KEY`
 - `FLATTRADE_API_SECRET`

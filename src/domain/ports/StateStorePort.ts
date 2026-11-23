@@ -32,5 +32,4 @@ export interface StateStorePort {
   saveDailySession(tradeDate: string, tokenEncryptedOrLocal: string): Promise<void>;
   getDailySession(tradeDate: string): Promise<string | null>;
   recordClosedTrade(trade: ClosedTradeRecord): Promise<void>;
-  consumeTotpStep(step: number): Promise<boolean>;
 }

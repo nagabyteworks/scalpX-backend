@@ -54,8 +54,8 @@ export class MockFlattradeServer {
         try {
           const parsed = JSON.parse(msg.toString());
           // Connection handshake
-          if (parsed.t === 'c') {
-            if (parsed.susertoken === this.sessionToken) {
+          if (parsed.t === 'a') {
+            if (parsed.accesstoken === this.sessionToken) {
               ws.send(JSON.stringify({ t: 'ck', s: 'OK' }));
             } else {
               ws.send(JSON.stringify({ t: 'ck', s: 'NOT_OK' }));

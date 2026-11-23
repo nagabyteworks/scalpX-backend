@@ -1,37 +1,9 @@
 # scalpX Backend API Contract
 
-## Authentication
+## Direct application access
 
-`POST /api/auth/daily-login`
-
-Request:
-
-```json
-{ "totp": "123456" }
-```
-
-Success `200`:
-
-```json
-{ "status": "ok", "accessToken": "<HS256 JWT>", "expiresIn": 900 }
-```
-
-Errors:
-
-- `400`: malformed TOTP
-- `401`: invalid or replayed TOTP
-- `429`: five-minute authentication lockout
-- `503`: backend TOTP secret unavailable
-
-All authenticated requests use only:
-
-```text
-Authorization: Bearer <access-token>
-```
-
-WebSocket connections use the same bearer token in the upgrade `Authorization` header. Device headers, claims, provisioning, and revocation do not exist.
-
-Legacy routes `/api/auth/provision-device`, `/api/auth/revoke-device`, and `/api/auth/device/authenticate` return `404`.
+The Android app does not require TOTP, device provisioning, a device UUID, or an application bearer session.
+REST market-data and control APIs are opened for the direct trading interface.
 
 ## Broker authorization
 
@@ -39,7 +11,7 @@ Legacy routes `/api/auth/provision-device`, `/api/auth/revoke-device`, and `/api
 - `GET /api/auth/flattrade/callback`
 - `GET /api/auth/status`
 
-Broker OAuth is independent of application TOTP authentication. Android must never receive broker credentials or Flattrade session tokens.
+Broker OAuth is independent of application startup. Android must never receive broker credentials or Flattrade session tokens.
 
 ## Market data
 
@@ -64,8 +36,7 @@ The initial and subsequent protective orders are broker-side `SL-LMT` orders. Ba
 ## Security and live-trading invariants
 
 - HTTPS is mandatory.
-- TOTP codes, bearer sessions, secrets, and broker session tokens are redacted from logs.
-- TOTP replay is protected atomically per accepted time step.
+- Application/device secrets and broker session tokens are redacted from logs.
 - `BROKER_MODE=live`.
 - `TRADING_ENABLED=false` unless explicitly approved.
 - Protected endpoints never bypass session validation.

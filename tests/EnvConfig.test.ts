@@ -3,7 +3,6 @@ import { loadConfig } from '../src/config/env.js';
 
 const VALID_LIVE_ENV = {
   TRADING_ENABLED: 'false',
-  APP_JWT_SECRET: 'test_secret_12345678',
   FLATTRADE_USER_ID: 'FT123456',
   FLATTRADE_API_KEY: 'real_api_key',
   FLATTRADE_API_SECRET: 'real_api_secret',

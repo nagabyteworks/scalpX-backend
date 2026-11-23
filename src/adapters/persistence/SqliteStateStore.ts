@@ -96,16 +96,8 @@ export class SqliteStateStore implements StateStorePort {
       );
     `);
 
-    // Legacy device authorization state is not created. Existing installations
-    // are migrated by dropping the obsolete table below.
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS totp_replay_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        last_step INTEGER
-      )
-    `);
-    this.db.exec('INSERT OR IGNORE INTO totp_replay_state (id, last_step) VALUES (1, NULL)');
     this.db.exec('DROP TABLE IF EXISTS authorized_devices');
+    this.db.exec('DROP TABLE IF EXISTS totp_replay_state');
   }
 
   /**
@@ -360,17 +352,6 @@ export class SqliteStateStore implements StateStorePort {
     return this.riskState.getRiskState(tradeDate);
   }
 
-  async consumeTotpStep(step: number): Promise<boolean> {
-    return this.enqueue(() => {
-      const transaction = this.db.transaction(() => {
-        const row = this.db.prepare('SELECT last_step FROM totp_replay_state WHERE id = 1').get() as { last_step: number | null };
-        if (row.last_step !== null && step <= row.last_step) return false;
-        this.db.prepare('UPDATE totp_replay_state SET last_step = ? WHERE id = 1').run(step);
-        return true;
-      });
-      return transaction();
-    });
-  }
 
   close(): void {
     this.db.close();

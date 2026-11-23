@@ -156,6 +156,28 @@ export class SessionService {
     return `BSE|${this.sensexIndexToken}`;
   }
 
+  async getIndexSpotInstrumentId(symbol: string): Promise<string> {
+    const normalized = symbol.trim().toUpperCase();
+    if (normalized === 'SENSEX') return this.getSensexSpotInstrumentId();
+    if (normalized === 'NIFTY') {
+      const indices = await this.broker.getIndexList('NSE');
+      const matches = indices.filter((index) => index.idxname.trim().toUpperCase() === 'NIFTY');
+      if (matches.length !== 1 || !/^\d+$/.test(matches[0]!.token)) {
+        throw new Error('Flattrade NSE index list did not return one valid NIFTY token.');
+      }
+      return `NSE|${matches[0]!.token}`;
+    }
+    if (normalized === 'BANKNIFTY') {
+      const indices = await this.broker.getIndexList('NSE');
+      const matches = indices.filter((index) => /BANK.*NIFTY/i.test(index.idxname));
+      if (matches.length !== 1 || !/^\d+$/.test(matches[0]!.token)) {
+        throw new Error('Flattrade NSE index list did not return one valid BANKNIFTY token.');
+      }
+      return `NSE|${matches[0]!.token}`;
+    }
+    throw new Error(`Unsupported index: ${normalized}`);
+  }
+
   private async ensureSensexSpotSubscription(): Promise<void> {
     if (!this.wsFeed) return;
     const instrumentId = await this.getSensexSpotInstrumentId();

@@ -2,31 +2,10 @@ openapi: 3.0.3
 info:
   title: scalpX Backend API
   version: 1.0.0
-  description: LIVE backend for TOTP authentication and Flattrade options trading.
+  description: LIVE backend for direct Android market display and Flattrade options trading.
 servers:
   - url: https://trade.nagabyte.com
 paths:
-  /api/auth/daily-login:
-    post:
-      summary: Authenticate with a backend-only TOTP
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [totp]
-              properties:
-                totp:
-                  type: string
-                  pattern: '^[0-9]{6}$'
-      responses:
-        '200':
-          description: Short-lived bearer session issued
-        '401':
-          description: Invalid or replayed TOTP
-        '429':
-          description: Authentication rate limited
   /api/market-data/sensex:
     get:
       security:

@@ -43,7 +43,6 @@ async function bootstrap() {
   // 6. Initialize Client WebSocket Hub
   const clientWsHub = new ClientWsHub(
     {
-      jwtSecret: env.APP_JWT_SECRET,
       throttleIntervalMs: 150,
     },
     engine
@@ -125,8 +124,6 @@ async function bootstrap() {
   // 10. Start Fastify HTTP Server
   const server = new HttpServer(
     {
-      jwtSecret: env.APP_JWT_SECRET,
-      deviceTotpSecret: env.DEVICE_TOTP_SECRET,
       tradingEnabled: env.TRADING_ENABLED,
       flattradeWsFeed: flattradeWs,
       // CORS: set to your Android app's origin or leave false for no CORS

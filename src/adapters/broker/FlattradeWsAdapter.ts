@@ -178,10 +178,10 @@ export class FlattradeWsAdapter implements MarketFeedPort {
 
   private sendAuthHandshake(): void {
     const payload = {
-      t: 'c',
+      t: 'a',
       uid: this.config.userId,
       actid: this.config.accountId ?? this.config.userId,
-      susertoken: this.config.sessionToken,
+      accesstoken: this.config.sessionToken,
       source: 'API',
     };
     this.send(payload);

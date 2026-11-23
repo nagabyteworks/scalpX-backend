@@ -80,20 +80,18 @@ describe('HttpServer Transport Layer Integration', () => {
     expect(data.openPositionsCount).toBe(0);
   });
 
-  it('GET /api/auth/login-url requires an Authorization header', async () => {
-    // Missing Authorization
+  it('GET /api/auth/login-url is public for separate Flattrade browser OAuth', async () => {
     const res1 = await fetch(`${baseUrl}/api/auth/login-url`, {
       headers: {},
     });
-    expect(res1.status).toBe(401);
+    expect(res1.status).toBe(200);
 
-    // Invalid Token
     const res2 = await fetch(`${baseUrl}/api/auth/login-url`, {
       headers: {
         Authorization: 'Bearer INVALID_TOKEN',
       },
     });
-    expect(res2.status).toBe(401);
+    expect(res2.status).toBe(200);
   });
 
   it('GET /api/auth/login-url succeeds with a valid JWT', async () => {
@@ -339,7 +337,7 @@ describe('HttpServer Transport Layer Integration', () => {
       });
 
       expect(res.status).toBe(503);
-      expect((await res.json() as any).error).toMatch(/instrument master/i);
+      expect((await res.json() as any).error).toMatch(/instrument resolution|spot is unavailable/i);
     });
 
     it('LIVE SENSEX chain fails closed without authoritative instrument and fresh spot data', async () => {
@@ -347,7 +345,7 @@ describe('HttpServer Transport Layer Integration', () => {
         headers: { 'X-Device-Id': 'DEVICE_123', Authorization: `Bearer ${validToken}` },
       });
       expect(res.status).toBe(503);
-      expect((await res.json() as any).error).toContain('instrument master');
+      expect((await res.json() as any).error).toMatch(/instrument resolution|spot is unavailable/i);
     });
   });
 

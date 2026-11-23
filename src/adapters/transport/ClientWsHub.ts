@@ -1,6 +1,5 @@
 import type http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import jwt from 'jsonwebtoken';
 import type { RatchetLadderEngine } from '../../domain/engines/RatchetLadderEngine.js';
 import type { Tick } from '../../domain/models/Tick.js';
 
@@ -13,7 +12,6 @@ export type CriticalEventType =
   | 'SESSION_UPDATED';
 
 export interface ClientWsHubConfig {
-  jwtSecret: string;
   throttleIntervalMs?: number; // Default 150 ms
 }
 
@@ -55,13 +53,6 @@ export class ClientWsHub {
     this.wss = new WebSocketServer({ server, path: '/ws' });
 
     this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-      // 1. Authenticate WebSocket upgrade
-      const auth = this.authenticateRequest(req);
-      if (!auth) {
-        ws.close(4001, 'Unauthorized: Invalid JWT');
-        return;
-      }
-
       this.clients.add(ws);
 
       // Send initial snapshot immediately upon connection
@@ -81,20 +72,7 @@ export class ClientWsHub {
   }
 
   private authenticateRequest(req: http.IncomingMessage): boolean {
-    // Strictly header-based authentication. Invariant: Never allow JWTs in query parameters.
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return false;
-    }
-
-    const token = authHeader.substring(7);
-
-    try {
-      jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] });
-      return true;
-    } catch {
-      return false;
-    }
+    return true;
   }
 
   /**

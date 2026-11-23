@@ -1,7 +1,5 @@
 import fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
-import jwt from 'jsonwebtoken';
-import { matchingTotpStep } from '../../application/Totp.js';
 import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,9 +16,9 @@ import type { BrokerPort } from '../../domain/ports/BrokerPort.js';
 import type { FlattradeWsAdapter } from '../broker/FlattradeWsAdapter.js';
 import { FlattradeOAuthError } from '../broker/FlattradeRestAdapter.js';
 import type { ClientWsHub } from './ClientWsHub.js';
+import { toPaise } from '../../domain/models/Money.js';
 
 export interface HttpServerConfig {
-  jwtSecret: string;
   tradingEnabled: boolean;
   flattradeWsFeed?: FlattradeWsAdapter;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30,15 +28,7 @@ export interface HttpServerConfig {
    * Production must set this to the Android app origin or '' to block all.
    */
   corsOrigin?: string | string[] | boolean;
-  /**
-   * Backend-only TOTP secret used to authenticate the Android owner.
-   */
-  deviceTotpSecret?: string;
 }
-
-export const TotpAuthenticationSchema = z.object({
-  totp: z.string().regex(/^\d{6}$/),
-});
 
 // Zod Schemas for Request Validation
 export const OneClickOrderSchema = z.object({
@@ -85,6 +75,25 @@ export const OptionChainQuerySchema = z.object({
   strikes: z.coerce.number().int().positive().default(10),
 });
 
+function parseContractExpiry(tsym: string): string | null {
+  const match = tsym.match(/(\d{2})([A-Z]{3})(\d{2})(?=\d*(?:CE|PE|C|P)$)/i);
+  if (!match) return null;
+  const day = Number(match[1]);
+  const monthName = match[2]!.toUpperCase();
+  const year = 2000 + Number(match[3]);
+  const months: Record<string, number> = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+  const month = months[monthName];
+  if (month === undefined) return null;
+  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function parseContractStrike(tsym: string): number | null {
+  const match = tsym.match(/(?:\d{2}[A-Z]{3}\d{2}|\d{2}[A-Z]{3}\d{4})(\d+(?:\.\d+)?)?(?:CE|PE|C|P)$/i);
+  if (!match) return null;
+  const strike = Number(match[1]);
+  return Number.isFinite(strike) ? strike : null;
+}
+
 export class HttpServer {
   public readonly app: FastifyInstance;
   private readonly config: HttpServerConfig;
@@ -95,7 +104,6 @@ export class HttpServer {
   private readonly stateStore: SqliteStateStore;
   private readonly broker: BrokerPort;
   private readonly wsHub?: ClientWsHub;
-  private readonly totpAuthFailures = new Map<string, { count: number; windowEndsAt: number }>();
 
   constructor(
     config: HttpServerConfig,
@@ -127,9 +135,6 @@ export class HttpServer {
                   'req.body.otp',
                   'body.otp',
                   'otp',
-                  'req.body.totp',
-                  'body.totp',
-                  'totp',
                   '*.api_secret',
                   '*.Password',
                   '*.jKey',
@@ -156,42 +161,6 @@ export class HttpServer {
       methods: ['GET', 'POST', 'PATCH'],
     });
 
-    // Authentication hook for all /api/* routes
-    this.app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
-      const url = request.url.split('?')[0] ?? '';
-
-      // Authentication and broker OAuth callback routes are public.
-      if (
-        !url.startsWith('/api/') ||
-        url === '/api/auth/daily-login' ||
-        url === '/api/auth/provision-device' ||
-        url === '/api/auth/revoke-device' ||
-        url === '/api/auth/device/authenticate' ||
-        url === '/api/auth/flattrade/callback'
-      ) {
-        return;
-      }
-
-      const authHeader = request.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        reply.code(401).send({ error: 'Missing or malformed Authorization header' });
-        return;
-      }
-
-      const token = authHeader.substring(7);
-      try {
-        const decoded = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] }) as {
-          sub?: string;
-          role?: string;
-        };
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (request as any).user = decoded;
-      } catch {
-        reply.code(401).send({ error: 'Invalid or expired JWT token' });
-        return;
-      }
-    });
   }
 
   /**
@@ -382,59 +351,6 @@ export class HttpServer {
     this.app.get('/auth/flattrade/callback', flattradeCallbackHandler);
 
     // -------------------------------------------------------------
-    // TOTP authentication endpoint
-
-    this.app.post('/api/auth/provision-device', async (_request, reply) => {
-      reply.code(404).send({ error: 'Not found' });
-    });
-    this.app.post('/api/auth/revoke-device', async (_request, reply) => {
-      reply.code(404).send({ error: 'Not found' });
-    });
-    this.app.post('/api/auth/device/authenticate', async (_request, reply) => {
-      reply.code(404).send({ error: 'Not found' });
-    });
-    // -------------------------------------------------------------
-
-    this.app.post('/api/auth/daily-login', async (request, reply) => {
-      const parsed = TotpAuthenticationSchema.safeParse(request.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: 'Provide a six-digit TOTP code.' });
-        return;
-      }
-      const { totp } = parsed.data;
-      const now = Date.now();
-      const key = request.ip;
-      const previous = this.totpAuthFailures.get(key);
-      if (previous && previous.windowEndsAt > now && previous.count >= 5) {
-        reply.code(429).send({ error: 'Too many authentication attempts. Wait five minutes and try again.' });
-        return;
-      }
-      if (!this.config.deviceTotpSecret) {
-        reply.code(503).send({ error: 'Device TOTP authentication is not configured on the backend.' });
-        return;
-      }
-      const step = matchingTotpStep(this.config.deviceTotpSecret, totp, now);
-      if (step === null || !(await this.stateStore.consumeTotpStep(step))) {
-        this.totpAuthFailures.set(key, !previous || previous.windowEndsAt <= now
-          ? { count: 1, windowEndsAt: now + 5 * 60_000 }
-          : { ...previous, count: previous.count + 1 });
-        reply.code(401).send({ error: 'Invalid or already-used TOTP.' });
-        return;
-      }
-      this.totpAuthFailures.delete(key);
-      const accessToken = jwt.sign(
-        { sub: 'scalpx-owner', role: 'owner' },
-        this.config.jwtSecret,
-        { algorithm: 'HS256', expiresIn: '15m' }
-      );
-      return {
-        status: 'ok',
-        accessToken,
-        expiresIn: 900,
-      };
-    });
-
-    // -------------------------------------------------------------
     // Authenticated API Endpoints
     // -------------------------------------------------------------
 
@@ -525,6 +441,39 @@ export class HttpServer {
       };
     });
 
+    this.app.get('/api/market-data/index', async (request, reply) => {
+      const symbol = String((request.query as Record<string, unknown>).symbol ?? 'SENSEX').toUpperCase();
+      let instrumentId: string;
+      try {
+        instrumentId = await this.sessionService.getIndexSpotInstrumentId(symbol);
+        await this.config.flattradeWsFeed?.subscribe([instrumentId]);
+      } catch (error) {
+        reply.code(503);
+        return {
+          index: symbol,
+          exchange: symbol === 'SENSEX' ? 'BSE' : 'NSE',
+          status: 'INSTRUMENT_UNAVAILABLE',
+          spotLtpPaise: null,
+          timestamp: null,
+          marketDataReady: false,
+        };
+      }
+      const tick = this.config.flattradeWsFeed?.getLatestTick(instrumentId) ?? null;
+      const ageMs = tick ? Math.max(0, Date.now() - tick.timestamp) : null;
+      const fresh = tick !== null && ageMs !== null && ageMs <= 3_000;
+      return {
+        index: symbol,
+        exchange: symbol === 'SENSEX' ? 'BSE' : 'NSE',
+        token: instrumentId.split('|')[1],
+        status: fresh ? 'READY' : tick ? 'STALE' : 'WAITING_FOR_TICK',
+        spotLtpPaise: fresh ? tick!.ltpPaise : null,
+        timestamp: fresh ? tick!.timestamp : null,
+        ageMs,
+        marketDataReady: fresh && !!this.config.flattradeWsFeed?.isAuthenticatedConnection(),
+        validation: 'TOKEN_FROM_FLATTRADE_GETINDEXLIST',
+      };
+    });
+
     // Option Chain (Supports SENSEX/BFO and NIFTY/NFO)
     this.app.get('/api/option-chain', async (request, reply) => {
       const parsed = OptionChainQuerySchema.safeParse(request.query);
@@ -536,11 +485,129 @@ export class HttpServer {
       const symbol = parsed.data.symbol.toUpperCase();
       const exch = parsed.data.exchange ?? (symbol === 'SENSEX' || symbol === 'BANKEX' ? 'BFO' : 'NFO');
 
-      // Flattrade GetOptionChain requires a tradable option/future symbol and a
-      // nonzero underlying midpoint. This service has no instrument-master
-      // lookup for the index token, so calling it with bare "SENSEX" and "0"
-      // would be an unsupported request and could not establish a fresh ATM.
-      reply.code(503).send({ error: `Live ${exch} option chain is unavailable until an authoritative instrument master and fresh quotes are configured.` });
+      let spotInstrumentId: string;
+      try {
+        spotInstrumentId = await this.sessionService.getIndexSpotInstrumentId(symbol);
+        await this.config.flattradeWsFeed?.subscribe([spotInstrumentId]);
+      } catch {
+        reply.code(503);
+        return { error: `Live ${exch} instrument resolution is unavailable for ${symbol}.` };
+      }
+
+      const spotTick = this.config.flattradeWsFeed?.getLatestTick(spotInstrumentId) ?? null;
+      const spotAgeMs = spotTick ? Date.now() - spotTick.timestamp : null;
+      if (!spotTick || spotAgeMs === null || spotAgeMs > 3000 || !spotTick.ltpPaise) {
+        reply.code(503);
+        return { error: `Live ${symbol} spot is unavailable or stale.` };
+      }
+
+      const spotRupees = (spotTick.ltpPaise / 100).toFixed(2);
+      let rawChain: unknown;
+      try {
+        rawChain = await this.broker.getOptionChain!(exch, symbol, spotRupees, parsed.data.strikes);
+      } catch (error) {
+        reply.code(502);
+        return { error: 'Flattrade option-chain request failed.', message: error instanceof Error ? error.message : undefined };
+      }
+      if (!rawChain || typeof rawChain !== 'object') {
+        reply.code(503);
+        return { error: 'Flattrade returned no authoritative option contracts.' };
+      }
+      const chain = rawChain as { stat?: string; values?: unknown[] };
+      if (chain.stat !== 'Ok' || !Array.isArray(chain.values)) {
+        reply.code(503);
+        return { error: 'Flattrade returned no authoritative option contracts.' };
+      }
+
+      const contracts = chain.values.flatMap((value) => {
+        if (!value || typeof value !== 'object') return [];
+        const item = value as Record<string, unknown>;
+        const tsym = typeof item.tsym === 'string' ? item.tsym : '';
+        const token = typeof item.token === 'string' ? item.token : '';
+        const expiry = typeof item.exd === 'string'
+          ? item.exd
+          : parseContractExpiry(tsym);
+        const strike = typeof item.strprc === 'string' || typeof item.strprc === 'number'
+          ? Number(item.strprc)
+          : parseContractStrike(tsym);
+        const optionType = typeof item.optt === 'string'
+          ? item.optt.toUpperCase()
+          : tsym.endsWith('CE') || tsym.endsWith('C') ? 'CE' : tsym.endsWith('PE') || tsym.endsWith('P') ? 'PE' : '';
+        if (!tsym || !token || !expiry || !Number.isFinite(strike)) return [];
+        return [{ tsym, token, expiry, strike, optionType, lotSize: Number(item.ls ?? 0), tickSize: Number(item.ti ?? 0) }];
+      });
+
+      if (!contracts.length) {
+        reply.code(503);
+        return { error: 'Flattrade option-chain response contained no valid dated contracts.' };
+      }
+      const today = getTodayDateIST();
+      const expiries = [...new Set(contracts.map((contract) => contract.expiry))]
+        .filter((expiry) => expiry >= today)
+        .sort();
+      if (!expiries.length) {
+        reply.code(503);
+        return { error: 'Flattrade option-chain response contained no future expiry.' };
+      }
+      const selectedExpiry = parsed.data.expiry && expiries.includes(parsed.data.expiry)
+        ? parsed.data.expiry
+        : expiries[0]!;
+      const selectedContracts = contracts.filter((contract) => contract.expiry === selectedExpiry);
+      const strikes = [...new Set(selectedContracts.map((contract) => contract.strike).filter((strike): strike is number => Number.isFinite(strike)))]
+        .sort((a, b) => a - b);
+      if (!strikes.length) {
+        reply.code(503);
+        return { error: 'No contracts were found for the selected expiry.' };
+      }
+      const spotRupeesNumber = spotTick.ltpPaise / 100;
+      const atmStrike = strikes.reduce<number>((nearest, strike) =>
+        Math.abs(strike - spotRupeesNumber) < Math.abs(nearest - spotRupeesNumber) ? strike : nearest
+      , strikes[0] as number);
+
+      const optionIds: string[] = [];
+      const strikeDtos = await Promise.all(strikes.map(async (strike) => {
+        const ce = selectedContracts.find((contract) => contract.strike === strike && contract.optionType === 'CE');
+        const pe = selectedContracts.find((contract) => contract.strike === strike && contract.optionType === 'PE');
+        if (ce) optionIds.push(`${exch}|${ce.token}`);
+        if (pe) optionIds.push(`${exch}|${pe.token}`);
+        let ceLtpPaise = ce ? this.config.flattradeWsFeed?.getLatestTick(`${exch}|${ce.token}`)?.ltpPaise : null;
+        let peLtpPaise = pe ? this.config.flattradeWsFeed?.getLatestTick(`${exch}|${pe.token}`)?.ltpPaise : null;
+        if (ce && ceLtpPaise == null) {
+          try {
+            const quote = await this.broker.getQuotes(exch, ce.token);
+            ceLtpPaise = quote.stat === 'Ok' && quote.lp ? toPaise(quote.lp) : null;
+          } catch {}
+        }
+        if (pe && peLtpPaise == null) {
+          try {
+            const quote = await this.broker.getQuotes(exch, pe.token);
+            peLtpPaise = quote.stat === 'Ok' && quote.lp ? toPaise(quote.lp) : null;
+          } catch {}
+        }
+        return {
+          strikePrice: strike,
+          ceToken: ce?.token ?? null,
+          ceSymbol: ce?.tsym ?? null,
+          ceLtpPaise,
+          peToken: pe?.token ?? null,
+          peSymbol: pe?.tsym ?? null,
+          peLtpPaise,
+        };
+      }));
+
+      if (optionIds.length && this.config.flattradeWsFeed) {
+        await this.config.flattradeWsFeed.subscribe(optionIds);
+      }
+
+      return {
+        symbol,
+        expiry: selectedExpiry,
+        strikes: strikeDtos,
+        atmStrike,
+        dataSource: 'FLATTRADE_GETOPTIONCHAIN',
+        marketDataReady: !!this.config.flattradeWsFeed?.isAuthenticatedConnection(),
+        validation: 'CONTRACTS_FROM_FLATTRADE_GETOPTIONCHAIN_AND_LIVE_SPOT',
+      };
     });
 
     // 1-Click Order Execution — fail closed while authoritative contracts are unavailable

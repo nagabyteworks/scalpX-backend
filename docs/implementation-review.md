@@ -1,23 +1,15 @@
 # Implementation Review
 
-## Authentication architecture
+## Application startup and authentication
 
-Device pre-authorization has been removed completely. The backend no longer creates, reads, or migrates `authorized_devices`, and provisioning/revoke/device-authenticate routes do not exist. The Android app does not generate or store a UUID.
-
-The application session flow is TOTP only:
-
-1. `POST /api/auth/daily-login` accepts exactly six digits.
-2. `DEVICE_TOTP_SECRET` remains backend-only.
-3. RFC 6238 verification uses a ±1 step window.
-4. Accepted steps are committed atomically through `totp_replay_state.last_step`.
-5. Repeated or older steps are rejected.
-6. Five failures trigger a five-minute IP lockout.
-7. A 15-minute HS256 bearer session is issued.
-8. REST and WebSocket authentication require the bearer session only.
+Device pre-authorization and TOTP authentication were removed from both repositories.
+The Android app starts directly in the trading cockpit.
+Flattrade authentication remains a separate browser-OAuth flow and does not require application TOTP.
+No device UUID or application bearer session is created or transmitted.
 
 ## Security and migration behavior
 
-Startup migration drops the legacy `authorized_devices` table and creates atomic TOTP replay state. TOTP codes and bearer tokens are redacted in application logging. Protected routes fail closed without a valid JWT.
+Startup migration drops legacy `authorized_devices` and `totp_replay_state` tables. Broker session tokens and secrets are redacted in application logging.
 
 ## Trading state
 
@@ -27,4 +19,4 @@ Backend startup reconciles broker positions and preserves unknown state as manua
 
 ## Verification
 
-Required verification includes TOTP success, replay, invalid input, rate limiting, session expiration, unauthorized API access, market-data stale handling, order lifecycle, SL lifecycle, restart reconciliation, backend tests, Android tests, type checks, and builds.
+Required verification includes direct startup, Flattrade OAuth, fresh spot resolution, option-chain contract resolution, live LTP updates, reconnection/resubscription, stale feed handling, order lifecycle, SL lifecycle, restart reconciliation, backend tests, Android tests, type checks, and builds.

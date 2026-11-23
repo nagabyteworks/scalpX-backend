@@ -46,14 +46,13 @@ describe('ClientWsHub Throttled WebSocket Integration', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it('rejects connection without a valid bearer token', async () => {
+  it('accepts direct app WebSocket connections without device or app authentication', async () => {
     const ws = new WebSocket(wsUrl);
-
-    const closeCode = await new Promise<number>((resolve) => {
-      ws.on('close', (code) => resolve(code));
+    const firstMessage = await new Promise<string>((resolve) => {
+      ws.on('message', (msg) => resolve(msg.toString()));
     });
-
-    expect(closeCode).toBe(4001);
+    expect(JSON.parse(firstMessage).type).toBe('SNAPSHOT');
+    ws.close();
   });
 
   it('authenticates and receives initial snapshot', async () => {

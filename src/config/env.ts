@@ -15,7 +15,6 @@ export const EnvSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
-  APP_JWT_SECRET: z.string().min(8, 'APP_JWT_SECRET must be at least 8 characters'),
   // Flattrade API v2 Credentials
   FLATTRADE_USER_ID: z.string().default('MOCK_USER'),
   FLATTRADE_API_KEY: z.string().default('MOCK_KEY'),
@@ -23,7 +22,6 @@ export const EnvSchema = z.object({
   FLATTRADE_REDIRECT_URL: z.string().default('https://trade.nagabyte.com/api/auth/flattrade/callback'),
   FLATTRADE_ACCOUNT_ID: z.string().optional(),
   FLATTRADE_WS_URL: z.string().optional(),
-  DEVICE_TOTP_SECRET: z.string().optional(),
 
   /**
    * DB_SESSION_ENCRYPTION_KEY: 32-byte hex key (64 hex chars) for AES-256-GCM encryption
