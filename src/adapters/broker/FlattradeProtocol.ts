@@ -24,8 +24,10 @@ export interface FlattradeTokenRequest {
 }
 
 export interface FlattradeTokenResponse {
-  stat: 'Ok' | 'Not_Ok';
   token?: string;
+  client?: string;
+  status?: string;
+  stat?: string;
   emsg?: string;
 }
 

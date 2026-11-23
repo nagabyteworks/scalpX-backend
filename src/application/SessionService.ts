@@ -1,4 +1,4 @@
-import type { FlattradeRestAdapter } from '../adapters/broker/FlattradeRestAdapter.js';
+import { FlattradeOAuthError, type FlattradeRestAdapter } from '../adapters/broker/FlattradeRestAdapter.js';
 import type { StateStorePort } from '../domain/ports/StateStorePort.js';
 import type { FlattradeWsAdapter } from '../adapters/broker/FlattradeWsAdapter.js';
 import type { ReconcilerService } from './ReconcilerService.js';
@@ -27,6 +27,19 @@ export interface SessionServiceOptions {
 }
 
 export type SessionValidity = 'VALID' | 'INVALID' | 'UNKNOWN';
+
+export type SessionAuthenticationStage =
+  | 'oauth_exchange'
+  | 'token_persistence'
+  | 'session_validation'
+  | 'websocket_connection';
+
+export class SessionAuthenticationError extends Error {
+  constructor(readonly stage: SessionAuthenticationStage, message: string) {
+    super(message);
+    this.name = 'SessionAuthenticationError';
+  }
+}
 
 export interface SessionState {
   sessionTokenPresent: boolean;
@@ -153,35 +166,66 @@ export class SessionService {
    * Exchanges OAuth request_code for session token, persists to SQLite, and updates broker client.
    */
   async exchangeAndSaveToken(requestCode: string): Promise<string> {
-    const token = await this.broker.exchangeOAuthToken(requestCode);
+    let token: string;
+    try {
+      token = await this.broker.exchangeOAuthToken(requestCode);
+    } catch (error) {
+      if (error instanceof FlattradeOAuthError) throw error;
+      throw new SessionAuthenticationError('oauth_exchange', 'Flattrade OAuth token exchange failed.');
+    }
     const today = getTodayDateIST();
-    await this.stateStore.saveDailySession(today, token);
+    try {
+      await this.stateStore.saveDailySession(today, token);
+    } catch {
+      throw new SessionAuthenticationError('token_persistence', 'Could not persist the Flattrade session.');
+    }
     if (typeof this.broker.setSessionToken === 'function') {
       this.broker.setSessionToken(token);
     }
     // Do not treat a successful code exchange as proof that the issued session
     // works. Confirm it through Flattrade's documented /Limits endpoint first.
     this.sessionValidationCache = null;
-    const validation = await this.getSessionState();
+    let validation: SessionState;
+    try {
+      validation = await this.getSessionState();
+    } catch {
+      throw new SessionAuthenticationError('session_validation', 'Could not validate the Flattrade session.');
+    }
     if (!validation.sessionValid) {
-      throw new Error(validation.sessionValidity === 'UNKNOWN'
+      throw new SessionAuthenticationError('session_validation', validation.sessionValidity === 'UNKNOWN'
         ? 'Flattrade session validation is currently unavailable.'
         : 'Flattrade rejected the exchanged session token.');
     }
 
     if (this.wsFeed) {
-      this.wsFeed.updateSessionToken(token);
+      try {
+        this.wsFeed.updateSessionToken(token);
+      } catch {
+        throw new SessionAuthenticationError('websocket_connection', 'Flattrade WebSocket session update failed.');
+      }
       try {
         await this.ensureSensexSpotSubscription();
-      } catch (err) {
-        console.warn('SENSEX index resolution failed; live spot data remains unavailable:', err instanceof Error ? err.message : 'unknown error');
+      } catch {
+        console.warn('Flattrade post-login authentication stage failed', { stage: 'websocket_subscription' });
       }
       // Do not hide broker WebSocket authentication failures from the caller.
-      await this.wsFeed.connect();
+      try {
+        await this.wsFeed.connect();
+      } catch {
+        throw new SessionAuthenticationError('websocket_connection', 'Flattrade WebSocket connection failed.');
+      }
     }
 
     if (this.reconciler) {
-      await this.reconciler.reconcile().catch(() => {});
+      try {
+        const result = await this.reconciler.reconcile();
+        if (result.uncertain) {
+          console.error('Flattrade post-login authentication stage failed', { stage: 'reconciliation' });
+        }
+      } catch {
+        // Reconciliation is a later, non-fatal stage. Never misreport it as an OAuth exchange failure.
+        console.error('Flattrade post-login authentication stage failed', { stage: 'reconciliation' });
+      }
     }
 
     if (this.wsHub) {

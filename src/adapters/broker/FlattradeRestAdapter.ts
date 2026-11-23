@@ -34,6 +34,36 @@ export interface ExitPositionResult extends OrderResult {
   error?: string;
 }
 
+export class FlattradeOAuthError extends Error {
+  readonly stage = 'oauth_exchange';
+
+  constructor(
+    message: string,
+    readonly httpStatus: number | null,
+    readonly oauthStatus: string | null,
+    readonly brokerMessage: string | null
+  ) {
+    super(message);
+    this.name = 'FlattradeOAuthError';
+  }
+}
+
+function sanitizeBrokerMessage(message: unknown, secrets: string[]): string | null {
+  if (typeof message !== 'string') return null;
+
+  let safe = message
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  for (const secret of secrets) {
+    if (secret) safe = safe.split(secret).join('[REDACTED]');
+  }
+  safe = safe.replace(/\b(request[_ -]?code|api[_ -]?(?:key|secret)|access[_ -]?token|session[_ -]?token|token|jkey|authorization)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]');
+  safe = safe.replace(/\b[A-Za-z0-9_-]*token[A-Za-z0-9_-]*\b/gi, '[REDACTED]');
+  safe = safe.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]');
+  return safe.slice(0, 200) || null;
+}
+
 export class FlattradeRestAdapter implements BrokerPort {
   private readonly config: FlattradeConfig;
   private readonly baseUrl: string;
@@ -76,27 +106,60 @@ export class FlattradeRestAdapter implements BrokerPort {
       api_secret: hash,
     };
 
-    const res = await request(this.authUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      dispatcher: this.dispatcher,
-    });
-
-    const responseText = await res.body.text();
-    let data: FlattradeTokenResponse;
+    let res: Awaited<ReturnType<typeof request>>;
     try {
-      data = JSON.parse(responseText);
+      res = await request(this.authUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        dispatcher: this.dispatcher,
+      });
     } catch {
-      throw new Error('Flattrade OAuth response was invalid');
+      throw new FlattradeOAuthError('Flattrade OAuth request failed', null, null, null);
     }
 
-    if (data.stat !== 'Ok' || !data.token) {
-      throw new Error('Flattrade OAuth exchange failed');
+    let responseText: string;
+    try {
+      responseText = await res.body.text();
+    } catch {
+      throw new FlattradeOAuthError('Flattrade OAuth response could not be read', res.statusCode, null, null);
     }
 
-    this.sessionToken = data.token;
-    return data.token;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(responseText) as unknown;
+    } catch {
+      throw new FlattradeOAuthError('Flattrade OAuth response was invalid', res.statusCode, null, null);
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new FlattradeOAuthError('Flattrade OAuth response was invalid', res.statusCode, null, null);
+    }
+    const data = parsed as FlattradeTokenResponse;
+
+    const responseStatus = data.status ?? data.stat;
+    const oauthStatus = sanitizeBrokerMessage(responseStatus, [requestCode, this.config.apiKey, rawSecret, hash]);
+    const brokerMessage = sanitizeBrokerMessage(data.emsg, [
+      requestCode,
+      this.config.apiKey,
+      rawSecret,
+      hash,
+      typeof data.token === 'string' ? data.token : '',
+    ]);
+
+    // The OAuth endpoint must return HTTP success as well as a successful OAuth status.
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw new FlattradeOAuthError('Flattrade OAuth endpoint returned an HTTP error', res.statusCode, oauthStatus, brokerMessage);
+    }
+    if (responseStatus !== 'Ok') {
+      throw new FlattradeOAuthError('Flattrade rejected OAuth token exchange', res.statusCode, oauthStatus, brokerMessage);
+    }
+    if (typeof data.token !== 'string' || data.token.trim().length === 0) {
+      throw new FlattradeOAuthError('Flattrade OAuth response did not include a valid token', res.statusCode, oauthStatus, brokerMessage);
+    }
+
+    const token = data.token.trim();
+    this.sessionToken = token;
+    return token;
   }
 
   /**

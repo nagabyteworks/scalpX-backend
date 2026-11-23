@@ -9,13 +9,14 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import { SessionService, getTodayDateIST } from '../../application/SessionService.js';
+import { SessionAuthenticationError, SessionService, getTodayDateIST } from '../../application/SessionService.js';
 import type { OrderManager } from '../../application/OrderManager.js';
 import type { ReconcilerService } from '../../application/ReconcilerService.js';
 import type { RatchetLadderEngine } from '../../domain/engines/RatchetLadderEngine.js';
 import type { SqliteStateStore } from '../persistence/SqliteStateStore.js';
 import type { BrokerPort } from '../../domain/ports/BrokerPort.js';
 import type { FlattradeWsAdapter } from '../broker/FlattradeWsAdapter.js';
+import { FlattradeOAuthError } from '../broker/FlattradeRestAdapter.js';
 import type { ClientWsHub } from './ClientWsHub.js';
 
 export interface HttpServerConfig {
@@ -142,6 +143,7 @@ export class HttpServer {
                   '*.jKey',
                   '*.token',
                   'headers.authorization',
+                  'req.url',
                   'req.query.code',
                   'req.query.request_code',
                   'query.code',
@@ -378,9 +380,32 @@ export class HttpServer {
         // Redirect to Android app deep link
         reply.redirect('scalper://auth/success', 302);
       } catch (err: unknown) {
-        // Broker errors may echo the request code or token. Keep them out of logs and responses.
-        this.app.log.error('Flattrade OAuth exchange failed');
-        reply.code(502).send({ error: 'OAuth exchange failed. Retry authentication.' });
+        // Only allow pre-sanitized, non-secret diagnostics from the adapter into logs.
+        const stage = err instanceof FlattradeOAuthError
+          ? err.stage
+          : err instanceof SessionAuthenticationError
+            ? err.stage
+            : 'authentication_callback';
+        const diagnostics = err instanceof FlattradeOAuthError
+          ? {
+              stage,
+              httpStatus: err.httpStatus,
+              oauthStatus: err.oauthStatus,
+              emsg: err.brokerMessage,
+            }
+          : { stage };
+        this.app.log.error(diagnostics, 'Flattrade authentication stage failed');
+
+        const error = stage === 'oauth_exchange'
+          ? 'OAuth exchange failed. Retry authentication.'
+          : stage === 'token_persistence'
+            ? 'Flattrade token persistence failed. Retry authentication.'
+            : stage === 'session_validation'
+              ? 'Flattrade session validation failed. Retry authentication.'
+              : stage === 'websocket_connection'
+                ? 'Flattrade WebSocket connection failed. Retry authentication.'
+                : 'Flattrade authentication failed. Retry authentication.';
+        reply.code(502).send({ error });
       }
     };
 
